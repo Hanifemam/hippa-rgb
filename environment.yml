@@ -17,6 +17,7 @@ dependencies:
   - pyyaml
   - pytest
   - ruff
+  - scikit-learn
  
 
   # --- CPU-only PyTorch (most reproducible anywhere) ---

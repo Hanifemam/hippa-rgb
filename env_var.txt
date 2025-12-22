@@ -1,0 +1,3 @@
+PROJ_NAME = "/mnt/slowdisk/public/HIPPA"
+TASK = "multiclass_classification"
+DATA_DIR = "/mnt/slowdisk/public/HIPPA"
