@@ -1,0 +1,34 @@
+name: cv-project
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip=24.*
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - opencv
+  - scikit-learn
+  - tqdm
+  - pillow
+  - pyyaml
+  - pytest
+  - ruff
+ 
+
+  # --- CPU-only PyTorch (most reproducible anywhere) ---
+  # - pytorch
+  # - torchvision
+  # - cpuonly
+
+  # --- GPU PyTorch (CUDA 12.x) ---
+  - pytorch
+  - torchvision
+  - pytorch-cuda=12.1
+
+  - pip:
+      - hydra-core
+      - mlflow
