@@ -5,13 +5,12 @@ Materialize train/val/test directly (no JSON files kept).
 - Copies into dataset/{train,val,test}/class_*.
 """
 
+import os
+import shutil
+import random
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-import os
-import shutil
-
-from sklearn.model_selection import train_test_split
 
 import read_env_var
 
@@ -85,6 +84,37 @@ def _apple_id(path: str) -> str:
     return parts[1] if len(parts) > 1 else parts[0]
 
 
+def _treatment_from_id(apple_id: str, default: int | None = None) -> int:
+    """Extract treatment digit from apple_id; fallback to provided default or -1."""
+    return int(apple_id[2]) if len(apple_id) > 2 and apple_id[2].isdigit() else (default if default is not None else -1)
+
+
+def _allocate_counts(n: int, val_frac: float = 0.15, test_frac: float = 0.15) -> tuple[int, int, int]:
+    """Deterministically compute train/val/test counts for a group of size n."""
+    if n == 0:
+        return 0, 0, 0
+    val = max(0, round(n * val_frac))
+    test = max(0, round(n * test_frac))
+    if n >= 3:
+        val = max(1, val)
+        test = max(1, test)
+    overflow = val + test - n
+    while overflow > 0:
+        if val >= test and val > 0:
+            val -= 1
+        elif test > 0:
+            test -= 1
+        overflow -= 1
+    train = n - val - test
+    if train == 0 and n > 0:
+        if val > test and val > 1:
+            val -= 1
+        elif test > 1:
+            test -= 1
+        train = 1
+    return train, val, test
+
+
 def split_dataset(organized_data, output_dir, included_batches=None, exclude_samples=None, modalities=None):
     data = organized_data
     included_batches = set(included_batches or [])
@@ -109,18 +139,36 @@ def split_dataset(organized_data, output_dir, included_batches=None, exclude_sam
             Path(output_dir, split, f"class_{c}").mkdir(parents=True, exist_ok=True)
 
     apple_ids = sorted({_apple_id(p) for info in filtered.values() for p in info["train"]})
-    train_ids, temp_ids = train_test_split(apple_ids, test_size=0.2, random_state=123)
-    val_ids, test_ids = train_test_split(temp_ids, test_size=0.5, random_state=123)
+
+    # Stratify by treatment to balance val/test across treatments
+    treatment_groups = defaultdict(list)
+    for aid in apple_ids:
+        treatment_groups[_treatment_from_id(aid)].append(aid)
+
+    train_ids, val_ids, test_ids = [], [], []
+    for treatment, ids in sorted(treatment_groups.items()):
+        rng = random.Random(123 + treatment)
+        ids_copy = ids.copy()
+        rng.shuffle(ids_copy)
+        train_n, val_n, test_n = _allocate_counts(len(ids_copy), val_frac=0.15, test_frac=0.15)
+        val_ids.extend(ids_copy[:val_n])
+        test_ids.extend(ids_copy[val_n : val_n + test_n])
+        train_ids.extend(ids_copy[val_n + test_n :])
+
     train_set, val_set, test_set = set(train_ids), set(val_ids), set(test_ids)
 
     counts = {c: {"total": 0, "train": 0, "val": 0, "test": 0} for c in unique_classes}
+    treatment_counts = defaultdict(lambda: {"train": 0, "val": 0, "test": 0, "total": 0})
     for info in filtered.values():
         c = info["class"]
         for path in info["train"]:
             aid = _apple_id(path)
+            treatment = _treatment_from_id(aid, info["class"])
             split = "train" if aid in train_set else "val" if aid in val_set else "test"
             counts[c]["total"] += 1
             counts[c][split] += 1
+            treatment_counts[treatment]["total"] += 1
+            treatment_counts[treatment][split] += 1
             dst = Path(output_dir, split, f"class_{c}", Path(path).name)
             shutil.copy2(path, dst)
 
@@ -128,6 +176,10 @@ def split_dataset(organized_data, output_dir, included_batches=None, exclude_sam
     for c in sorted(unique_classes):
         ct = counts[c]
         print(f"class {c}: {ct['train']} train / {ct['val']} val / {ct['test']} test (total {ct['total']})")
+    print("Treatment distribution (per split):")
+    for t in sorted(treatment_counts):
+        ct = treatment_counts[t]
+        print(f"  treatment {t}: {ct['train']} train / {ct['val']} val / {ct['test']} test (total {ct['total']})")
     print("Split is deterministic (seed=123); rerun will reproduce the same partitions.")
 
 
