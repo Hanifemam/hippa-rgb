@@ -12,6 +12,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+import filter_treatment
 import read_env_var
 
 
@@ -115,16 +116,25 @@ def _allocate_counts(n: int, val_frac: float = 0.15, test_frac: float = 0.15) ->
     return train, val, test
 
 
-def split_dataset(organized_data, output_dir, included_batches=None, exclude_samples=None, modalities=None):
+def split_dataset(organized_data, output_dir, included_batches=None, exclude_samples=None, modalities=None, filters=None):
     data = organized_data
     included_batches = set(included_batches or [])
     exclude_samples = set(exclude_samples or [])
     modalities = set(modalities or ["RGB", "SPT", "HYP"])
+    filters = filters or []
 
-    filtered = {}
+    filtered, filtered_counts = {}, defaultdict(int)
     for key, info in data.items():
         if (not included_batches or info["batch"] in included_batches) and info["data_type"] in modalities:
-            keep = [p for p in info["train"] if _apple_id(p) not in exclude_samples]
+            keep = []
+            for p in info["train"]:
+                aid = _apple_id(p)
+                match = filter_treatment.match_filter(Path(p).name, filters)
+                if aid in exclude_samples or match:
+                    if match:
+                        filtered_counts[match] += 1
+                    continue
+                keep.append(p)
             if keep:
                 sample_id = _apple_id(keep[0])
                 if len(sample_id) >= 3 and sample_id[2].isdigit():
@@ -180,10 +190,20 @@ def split_dataset(organized_data, output_dir, included_batches=None, exclude_sam
     for t in sorted(treatment_counts):
         ct = treatment_counts[t]
         print(f"  treatment {t}: {ct['train']} train / {ct['val']} val / {ct['test']} test (total {ct['total']})")
+    total_filtered = sum(filtered_counts.values())
+    print(f"Filtered samples: {total_filtered}")
+    for (batch, treatment), n in sorted(filtered_counts.items()):
+        print(f"  batch {batch:02d}, treatment {treatment}: {n}")
     print("Split is deterministic (seed=123); rerun will reproduce the same partitions.")
 
 
 def main():
+    DEFAULT_FILTERS: list[tuple[int, set[int]]] = [
+    (7, {2}),
+    (23, {7}),
+    (32, {3}),
+    (34, {2}),
+    ]
     env = read_env_var.evn_var_dict
     root = Path(env["PROJ_NAME"]) / env["TASK"]
     raw = Path(env["DATA_DIR"])
@@ -194,6 +214,7 @@ def main():
         included_batches=[4, 7, 8, 10, 12, 13, 23, 32, 34],
         exclude_samples=["10201", "10202", "10601", "10603", "10716"],
         modalities=["RGB"],
+        filters=DEFAULT_FILTERS,
     )
 
 

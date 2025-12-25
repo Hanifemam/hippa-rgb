@@ -2,13 +2,15 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+data/
+data/*
 # C extensions
 *.so
 cat > .gitignore <<'EOF'
 __pycache__/
 *.pyc
-
+/home/hemamgholizadeh/hippa-rgb/data
+/home/hemamgholizadeh/hippa-rgb/data/*
 # Project outputs & data
 apple_type_prediction/data_sets/
 apple_type_prediction/temp_data/

@@ -1,5 +1,6 @@
 # hippa_dataloaders.py
 from __future__ import annotations
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Union
@@ -82,15 +83,15 @@ class HIPPASet(Dataset):
 
 @dataclass
 class HIPPADataLoader:
-    image_dir: Union[str, Path]
-    csv_path: Union[str, Path]  # image_progression_cultivar.csv
+    image_dir: Union[str, Path] = Path("/home/hemamgholizadeh/hippa-rgb/data")
+    csv_path: Union[str, Path] = Path("/home/hemamgholizadeh/hippa-rgb/data/meta_data.csv")  # image_progression_cultivar.csv
     batch_size: int = 32
     num_workers: int = 4
     img_size: int = 224
     pin_memory: bool = True
     drop_last: bool = True
     strict_csv_match: bool = True
-    image_col: str = "image_name"
+    image_col: str = "sample_name"
     cult_col: str = "cultivar"
     prog_col: str = "progression"
     train_tf: Optional[Callable] = None
@@ -134,3 +135,36 @@ class HIPPADataLoader:
     def dataloader_image_cultivar(self, split: str = "train"): return self._loader(split, "img_cult")
     def dataloader_image_progression(self, split: str = "train"): return self._loader(split, "img_prog")
     def dataloader_image_progression_cultivar(self, split: str = "train"): return self._loader(split, "img_prog_cult")
+
+
+if __name__ == "__main__":
+    data_root = Path("/home/hemamgholizadeh/hippa-rgb/data")
+    csv_file = data_root / "meta_data.csv"
+
+    loader = HIPPADataLoader(
+        image_dir=data_root,
+        csv_path=csv_file,
+        image_col="sample_name",
+        batch_size=2,
+        num_workers=0,
+        drop_last=False,
+        strict_csv_match=False,
+    )
+
+    train_loader = loader.dataloader_image("train")
+    print(f"Train images available: {len(train_loader.dataset)}")
+    x_train, y_train = next(iter(train_loader))
+    print(f"Loaded train batch: images {tuple(x_train.shape)}, labels {tuple(y_train.shape)}")
+
+    val_loader = loader.dataloader_image("val")
+    print(f"Val images available: {len(val_loader.dataset)}")
+    x_val, y_val = next(iter(val_loader))
+    print(f"Loaded val batch: images {tuple(x_val.shape)}, labels {tuple(y_val.shape)}")
+
+    id2label = {i: c for c, i in loader.label2id.items()}
+    for split, ds in [("train", train_loader.dataset), ("val", val_loader.dataset)]:
+        counts = Counter([label for _, label, _ in ds.items])
+        print(f"{split.capitalize()} class count: {len(id2label)} classes")
+        for cid in sorted(id2label):
+            cname = id2label[cid]
+            print(f"  {split} {cname}: {counts.get(cid, 0)} samples")
