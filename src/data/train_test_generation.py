@@ -191,7 +191,7 @@ def main():
     split_dataset(
         organized_data=organized,
         output_dir=root / "dataset",
-        included_batches=[4, 7, 8, 10, 11, 12, 13, 17],
+        included_batches=[4, 7, 8, 10, 12, 13, 23, 32, 34],
         exclude_samples=["10201", "10202", "10601", "10603", "10716"],
         modalities=["RGB"],
     )
