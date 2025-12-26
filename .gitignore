@@ -14,7 +14,6 @@ __pycache__/
 # Project outputs & data
 apple_type_prediction/data_sets/
 apple_type_prediction/temp_data/
-**/models/
 **/checkpoints/
 **/outputs/
 **/plots/
@@ -33,9 +32,6 @@ apple_type_prediction/temp_data/
 *.jpg
 *.jpeg
 EOF
-
-git add .gitignore
-git commit -m "chore: ignore datasets, models, plots, and large artifacts"
 
 # Distribution / packaging
 .Python
@@ -209,7 +205,6 @@ cython_debug/
 .pypirc
 hippa
 data/
-models/
 .DS_Store
 */.DS_Store
 */results
