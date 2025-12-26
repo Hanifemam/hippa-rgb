@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple, Optional
+from typing import Callable, Dict, List, Tuple, Optional
 
 import torch
 from tqdm.auto import tqdm
@@ -77,10 +77,18 @@ def train(
     loss_fn: torch.nn.Module,
     epochs: int,
     device: torch.device,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+    scheduler_on: str = "loss",  # "loss" or "epoch"
+    early_stopping_patience: Optional[int] = None,
+    epoch_save_fn: Optional[Callable[[int, Dict[str, List[float]], Dict[str, torch.Tensor]], None]] = None,
 ) -> Dict[str, List[float]]:
     """Train and validate a model, returning epoch metrics."""
     model.to(device)
     history: Dict[str, List[float]] = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    best_val_loss = float("inf")
+    best_state = None
+    best_epoch = 0
+    no_improve = 0
 
     for epoch in tqdm(range(1, epochs + 1), desc="Training"):
         train_loss, train_acc = train_step(model, train_dataloader, loss_fn, optimizer, device)
@@ -91,10 +99,40 @@ def train(
         history["val_loss"].append(val_loss)
         history["val_acc"].append(val_acc)
 
+        if scheduler is not None:
+            if scheduler_on == "loss":
+                # ReduceLROnPlateau expects metric; others ignore extra arg
+                try:
+                    scheduler.step(val_loss)
+                except TypeError:
+                    scheduler.step()
+            else:
+                scheduler.step()
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            no_improve = 0
+            best_state = {k: v.cpu() for k, v in model.state_dict().items()}
+        else:
+            no_improve += 1
+
         print(
             f"Epoch {epoch:02d} | "
             f"train_loss: {train_loss:.4f}, train_acc: {train_acc:.4f} | "
             f"val_loss: {val_loss:.4f}, val_acc: {val_acc:.4f}"
         )
 
-    return history
+        if epoch_save_fn is not None:
+            epoch_save_fn(epoch, history, {k: v.detach().cpu() for k, v in model.state_dict().items()})
+
+        if early_stopping_patience is not None and no_improve >= early_stopping_patience:
+            print(f"Early stopping triggered at epoch {epoch} (no improvement for {no_improve} epochs).")
+            break
+
+    return {
+        "history": history,
+        "best_val_loss": best_val_loss,
+        "best_epoch": best_epoch,
+        "best_state_dict": best_state,
+    }

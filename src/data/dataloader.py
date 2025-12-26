@@ -14,14 +14,16 @@ from torchvision import transforms as T
 _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD  = [0.229, 0.224, 0.225]
 
-def _tf(train: bool, s: int) -> Callable:
+def _tf(train: bool, s: int, use_trivial_augment: bool) -> Callable:
     if train:
-        return T.Compose([
-            T.RandomResizedCrop(s, scale=(0.8, 1.0)),
-            T.RandomHorizontalFlip(),
+        aug = [T.RandomResizedCrop(s, scale=(0.8, 1.0)), T.RandomHorizontalFlip()]
+        if use_trivial_augment:
+            aug.append(T.TrivialAugmentWide())
+        aug.extend([
             T.ToTensor(),
             T.Normalize(_IMAGENET_MEAN, _IMAGENET_STD),
         ])
+        return T.Compose(aug)
     return T.Compose([
         T.Resize(int(s * 256 / 224)),
         T.CenterCrop(s),
@@ -96,6 +98,7 @@ class HIPPADataLoader:
     prog_col: str = "progression"
     train_tf: Optional[Callable] = None
     eval_tf: Optional[Callable] = None
+    use_trivial_augment: bool = True
 
     def __post_init__(self):
         self.image_dir, self.csv_path = Path(self.image_dir), Path(self.csv_path)
@@ -115,8 +118,8 @@ class HIPPADataLoader:
             if miss: raise KeyError(f"CSV missing {len(miss)} train image(s), e.g. {miss[:5]}")
         self.cultivar2id, self.progression2id = _enc(df_tr[self.cult_col]), _enc(df_tr[self.prog_col])
 
-        self.train_tf = self.train_tf or _tf(True, self.img_size)
-        self.eval_tf  = self.eval_tf  or _tf(False, self.img_size)
+        self.train_tf = self.train_tf or _tf(True, self.img_size, self.use_trivial_augment)
+        self.eval_tf  = self.eval_tf  or _tf(False, self.img_size, self.use_trivial_augment)
 
     def _loader(self, split: str, mode: str):
         ds = HIPPASet(
