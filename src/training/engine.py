@@ -15,16 +15,20 @@ def train_step(
     loss_fn: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    forward_fn: Optional[Callable[[torch.nn.Module, tuple, torch.device], Tuple[torch.Tensor, torch.Tensor]]] = None,
 ) -> Tuple[float, float]:
     """Single training epoch."""
     model.train()
     train_loss, train_acc = 0.0, 0.0
 
     loop = tqdm(dataloader, desc="train_step", leave=False)
-    for batch_idx, (X, y) in enumerate(loop):
-        X, y = X.to(device), y.to(device)
-
-        logits = model(X)
+    for batch_idx, batch in enumerate(loop):
+        if forward_fn is None:
+            X, y = batch
+            X, y = X.to(device), y.to(device)
+            logits = model(X)
+        else:
+            logits, y = forward_fn(model, batch, device)
         loss = loss_fn(logits, y)
 
         optimizer.zero_grad()
@@ -47,6 +51,7 @@ def eval_step(
     dataloader: torch.utils.data.DataLoader,
     loss_fn: torch.nn.Module,
     device: torch.device,
+    forward_fn: Optional[Callable[[torch.nn.Module, tuple, torch.device], Tuple[torch.Tensor, torch.Tensor]]] = None,
 ) -> Tuple[float, float]:
     """Single evaluation epoch."""
     model.eval()
@@ -54,9 +59,13 @@ def eval_step(
 
     with torch.inference_mode():
         loop = tqdm(dataloader, desc="eval_step", leave=False)
-        for batch_idx, (X, y) in enumerate(loop):
-            X, y = X.to(device), y.to(device)
-            logits = model(X)
+        for batch_idx, batch in enumerate(loop):
+            if forward_fn is None:
+                X, y = batch
+                X, y = X.to(device), y.to(device)
+                logits = model(X)
+            else:
+                logits, y = forward_fn(model, batch, device)
             loss = loss_fn(logits, y)
             preds = logits.argmax(dim=1)
             eval_loss += loss.item()
@@ -81,6 +90,7 @@ def train(
     scheduler_on: str = "loss",  # "loss" or "epoch"
     early_stopping_patience: Optional[int] = None,
     epoch_save_fn: Optional[Callable[[int, Dict[str, List[float]], Dict[str, torch.Tensor]], None]] = None,
+    forward_fn: Optional[Callable[[torch.nn.Module, tuple, torch.device], Tuple[torch.Tensor, torch.Tensor]]] = None,
 ) -> Dict[str, List[float]]:
     """Train and validate a model, returning epoch metrics."""
     model.to(device)
@@ -91,8 +101,8 @@ def train(
     no_improve = 0
 
     for epoch in tqdm(range(1, epochs + 1), desc="Training"):
-        train_loss, train_acc = train_step(model, train_dataloader, loss_fn, optimizer, device)
-        val_loss, val_acc = eval_step(model, val_dataloader, loss_fn, device)
+        train_loss, train_acc = train_step(model, train_dataloader, loss_fn, optimizer, device, forward_fn)
+        val_loss, val_acc = eval_step(model, val_dataloader, loss_fn, device, forward_fn)
 
         history["train_loss"].append(train_loss)
         history["train_acc"].append(train_acc)

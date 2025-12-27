@@ -8,7 +8,6 @@ import os
 import shutil
 import sys
 from datetime import datetime
-from itertools import product
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
@@ -69,18 +68,23 @@ def run_single_experiment(
     device: torch.device,
     train_loader,
     val_loader,
+    forward_fn=None,
 ) -> Dict[str, Any]:
     """Train one hyperparameter combo and save artifacts."""
     combo_dir.mkdir(parents=True, exist_ok=True)
 
-    model = build_model(
-        model_name=base_hparams["model_name"],
-        in_channels=base_hparams["in_channels"],
-        num_classes=base_hparams["num_classes"],
-        img_size=base_hparams["img_size"],
-        hidden_dim=base_hparams["hidden_dim"],
-        dropout=base_hparams["dropout"],
-    ).to(device)
+    model_kwargs = {
+        "model_name": base_hparams["model_name"],
+        "in_channels": base_hparams["in_channels"],
+        "num_classes": base_hparams["num_classes"],
+        "img_size": base_hparams["img_size"],
+        "hidden_dim": base_hparams["hidden_dim"],
+        "dropout": base_hparams["dropout"],
+    }
+    for opt_key in ("num_cultivars", "num_progressions", "fusion_mode"):
+        if opt_key in base_hparams and base_hparams[opt_key] is not None:
+            model_kwargs[opt_key] = base_hparams[opt_key]
+    model = build_model(**model_kwargs).to(device)
 
     _save_model_summaries(
         model=model,
@@ -124,6 +128,7 @@ def run_single_experiment(
         scheduler_on="loss",
         early_stopping_patience=5,
         epoch_save_fn=_epoch_save,
+        forward_fn=forward_fn,
     )
 
     # Load best weights for evaluation/pred logging.
@@ -149,7 +154,7 @@ def run_single_experiment(
     # Save per-sample predictions on val split.
     preds_path = combo_dir / "val_predictions.csv"
     val_preds, val_labels, val_names = _save_predictions(
-        model, val_loader, device, base_hparams["class_to_idx"], preds_path
+        model, val_loader, device, base_hparams["class_to_idx"], preds_path, forward_fn=forward_fn
     )
 
     _save_confusion_matrix(val_labels, val_preds, combo_dir / "val_confusion_matrix.png",
@@ -173,7 +178,7 @@ def run_single_experiment(
     return train_result
 
 
-def _save_predictions(model, loader, device, label2id: Dict[str, int], out_path: Path) -> Tuple[List[int], List[int], List[str]]:
+def _save_predictions(model, loader, device, label2id: Dict[str, int], out_path: Path, forward_fn=None) -> Tuple[List[int], List[int], List[str]]:
     """Save sample_name, true_label, pred_label for the given loader."""
     id2label = {v: k for k, v in label2id.items()}
     records: List[List[str]] = []
@@ -184,9 +189,13 @@ def _save_predictions(model, loader, device, label2id: Dict[str, int], out_path:
     idx = 0
     model.eval()
     with torch.no_grad():
-        for images, labels in loader:
-            images = images.to(device)
-            logits = model(images)
+        for batch in loader:
+            if forward_fn is None:
+                images, labels = batch
+                images, labels = images.to(device), labels.to(device)
+                logits = model(images)
+            else:
+                logits, labels = forward_fn(model, batch, device)
             preds = logits.argmax(dim=1).cpu().tolist()
             labels_list = labels.cpu().tolist()
             bs = len(labels_list)
@@ -321,6 +330,36 @@ def _save_history(history: Dict[str, List[float]], json_path: Path, csv_path: Pa
     print(f"[save] {csv_path}")
 
 
+def _forward_factory(mode: str):
+    """Return a forward_fn compatible with engine.train for the given dataloader mode."""
+    def _img(model, batch, device):
+        x, y = batch
+        x, y = x.to(device), y.to(device)
+        return model(x), y
+
+    def _cult(model, batch, device):
+        x, cult, y = batch
+        x, cult, y = x.to(device), cult.to(device), y.to(device)
+        return model(x, cultivar_ids=cult), y
+
+    def _prog(model, batch, device):
+        x, prog, y = batch
+        x, prog, y = x.to(device), prog.to(device), y.to(device)
+        return model(x, progression_ids=prog), y
+
+    def _both(model, batch, device):
+        x, prog, cult, y = batch
+        x, prog, cult, y = x.to(device), prog.to(device), cult.to(device), y.to(device)
+        return model(x, progression_ids=prog, cultivar_ids=cult), y
+
+    return {
+        "img": _img,
+        "img_cult": _cult,
+        "img_prog": _prog,
+        "img_prog_cult": _both,
+    }[mode]
+
+
 def main():
     data_root = Path("/home/hemamgholizadeh/hippa-rgb/data")
     csv_path = data_root / "meta_data.csv"
@@ -338,18 +377,18 @@ def main():
         "in_channels": 3,
         "hidden_dim": 512,
         "dropout": 0.5,
-        "num_workers": worker_count,  # avoid worker hangs during debug
+        "num_workers": worker_count, 
         "pin_memory": False,
         "drop_last": False,
         "strict_csv_match": False,
         "use_trivial_augment": True,
         "learning_rate": 1e-4,
-        "epochs": 30,
+        "epochs": 20,
         "optimizer": "Adam",
         "loss_fn": "CrossEntropyLoss",
         "device": str(device),
     }
-    run_root = results_root / f"{base_hparams['model_name']}_{ts}"
+    run_root = results_root / f"conv4dcnn_fusion_grid_{ts}"
 
     data = HIPPADataLoader(
         image_dir=data_root,
@@ -362,45 +401,80 @@ def main():
         strict_csv_match=base_hparams["strict_csv_match"],
         use_trivial_augment=base_hparams["use_trivial_augment"],
     )
-    train_loader = data.dataloader_image("train")
-    val_loader = data.dataloader_image("val")
-
-    try:
-        first_batch = next(iter(train_loader))
-        x0, y0 = first_batch
-        print(f"[Sanity] First batch loaded: images {tuple(x0.shape)}, labels {tuple(y0.shape)}")
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError(f"Dataloader failed to produce a batch: {exc}") from exc
-
-    grid = {
-        "dropout": [0.3, 0.5],
-        "learning_rate": [1e-3, 5e-4, 1e-4],
-        "optimizer": ["Adam", "AdamW", "SGD+momentum"],
+    forward_map = {
+        "img": _forward_factory("img"),
+        "img_cult": _forward_factory("img_cult"),
+        "img_prog": _forward_factory("img_prog"),
+        "img_prog_cult": _forward_factory("img_prog_cult"),
     }
-
+    loader_map = {
+        "img": data.dataloader_image,
+        "img_cult": data.dataloader_image_cultivar,
+        "img_prog": data.dataloader_image_progression,
+        "img_prog_cult": data.dataloader_image_progression_cultivar,
+    }
+    fusion_modes = ("concat", "sum", "prod", "concat+sum+prod")
+    variants = [
+        {"name": "conv4_pure", "model_name": "conv4dcnn", "mode": "img", "fusion_mode": None},
+    ]
+    for fm in fusion_modes:
+        variants.extend([
+            {"name": f"conv4_cult_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_cult", "fusion_mode": fm},
+            {"name": f"conv4_prog_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_prog", "fusion_mode": fm},
+            {"name": f"conv4_both_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
+        ])
+    grid = {
+        "dropout": [0.3],
+        "learning_rate": [1e-2, 5e-4, 1e-4],
+        "optimizer": ["Adam"],
+    }
+# "optimizer": ["Adam", "AdamW"],
     run_root.mkdir(parents=True, exist_ok=True)
     run_summaries: List[Dict[str, Any]] = []
 
-    for dropout, lr, opt_name in product(grid["dropout"], grid["learning_rate"], grid["optimizer"]):
-        combo_name = f"{base_hparams['model_name']}_drop{dropout}_lr{lr}_opt{opt_name.replace('+','').lower()}"
-        combo_dir = run_root / combo_name
-        hparams = dict(base_hparams)
-        hparams.update({
-            "dropout": dropout,
-            "learning_rate": lr,
-            "optimizer": opt_name,
-            "class_to_idx": data.label2id,
-            "num_classes": len(data.label2id),
-        })
-        print(f"\n=== Running combo: {combo_name} ===")
-        result = run_single_experiment(combo_dir, hparams, device, train_loader, val_loader)
-        run_summaries.append({
-            "combo": combo_name,
-            "dir": str(combo_dir),
-            "best_val_loss": result.get("best_val_loss"),
-            "best_epoch": result.get("best_epoch"),
-            "final_val_acc": result.get("history", {}).get("val_acc", [])[-1] if result.get("history", {}).get("val_acc") else None,
-        })
+    for variant in variants:
+        mode = variant["mode"]
+        fusion_mode = variant["fusion_mode"]
+        train_loader = loader_map[mode]("train")
+        val_loader = loader_map[mode]("val")
+        for dropout in grid["dropout"]:
+            for lr in grid["learning_rate"]:
+                for opt_name in grid["optimizer"]:
+                    combo_name = f"{variant['name']}_drop{dropout}_lr{lr}_opt{opt_name.replace('+','').lower()}"
+                    combo_dir = run_root / combo_name
+                    hparams = dict(base_hparams)
+                    hparams.update({
+                        "model_name": variant["model_name"],
+                        "dropout": dropout,
+                        "learning_rate": lr,
+                        "optimizer": opt_name,
+                        "class_to_idx": data.label2id,
+                        "num_classes": len(data.label2id),
+                    })
+                    if fusion_mode is not None:
+                        hparams["fusion_mode"] = fusion_mode
+                    if "cult" in mode:
+                        hparams["num_cultivars"] = len(data.cultivar2id)
+                    if "prog" in mode:
+                        hparams["num_progressions"] = len(data.progression2id)
+                    print(f"\n=== Running combo: {combo_name} ===")
+                    result = run_single_experiment(
+                        combo_dir,
+                        hparams,
+                        device,
+                        train_loader,
+                        val_loader,
+                        forward_map[mode],
+                    )
+                    run_summaries.append({
+                        "combo": combo_name,
+                        "variant": variant["name"],
+                        "dir": str(combo_dir),
+                        "best_val_loss": result.get("best_val_loss"),
+                        "best_epoch": result.get("best_epoch"),
+                        "final_val_acc": result.get("history", {}).get("val_acc", [])[-1] if result.get("history", {}).get("val_acc") else None,
+                        "hparams": {"dropout": dropout, "learning_rate": lr, "optimizer": opt_name, "fusion_mode": fusion_mode},
+                    })
 
     best_run = None
     loss_ranked = [r for r in run_summaries if r.get("best_val_loss") is not None]
