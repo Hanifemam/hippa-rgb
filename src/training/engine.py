@@ -91,6 +91,7 @@ def train(
     early_stopping_patience: Optional[int] = None,
     epoch_save_fn: Optional[Callable[[int, Dict[str, List[float]], Dict[str, torch.Tensor]], None]] = None,
     forward_fn: Optional[Callable[[torch.nn.Module, tuple, torch.device], Tuple[torch.Tensor, torch.Tensor]]] = None,
+    writer: Optional["SummaryWriter"] = None,
 ) -> Dict[str, List[float]]:
     """Train and validate a model, returning epoch metrics."""
     model.to(device)
@@ -135,6 +136,14 @@ def train(
 
         if epoch_save_fn is not None:
             epoch_save_fn(epoch, history, {k: v.detach().cpu() for k, v in model.state_dict().items()})
+
+        if writer is not None:
+            writer.add_scalar("loss/train", train_loss, epoch)
+            writer.add_scalar("loss/val", val_loss, epoch)
+            writer.add_scalar("acc/train", train_acc, epoch)
+            writer.add_scalar("acc/val", val_acc, epoch)
+            writer.add_scalar("lr", optimizer.param_groups[0].get("lr", float("nan")), epoch)
+            writer.flush()
 
         if early_stopping_patience is not None and no_improve >= early_stopping_patience:
             print(f"Early stopping triggered at epoch {epoch} (no improvement for {no_improve} epochs).")

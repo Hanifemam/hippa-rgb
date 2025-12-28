@@ -1,10 +1,12 @@
 # hippa_dataloaders.py
 from __future__ import annotations
 from collections import Counter
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Union
 
+import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
@@ -89,6 +91,7 @@ class HIPPADataLoader:
     csv_path: Union[str, Path] = Path("/home/hemamgholizadeh/hippa-rgb/data/meta_data.csv")  # image_progression_cultivar.csv
     batch_size: int = 32
     num_workers: int = 4
+    seed: Optional[int] = None
     img_size: int = 224
     pin_memory: bool = True
     drop_last: bool = True
@@ -102,6 +105,7 @@ class HIPPADataLoader:
 
     def __post_init__(self):
         self.image_dir, self.csv_path = Path(self.image_dir), Path(self.csv_path)
+        self.seed = int(self.seed) if self.seed is not None else None
         classes = sorted([p.name for p in (self.image_dir / "train").iterdir() if p.is_dir()])
         if not classes: raise ValueError(f"No class folders under {self.image_dir/'train'}")
         self.label2id = {c: i for i, c in enumerate(classes)}
@@ -120,6 +124,15 @@ class HIPPADataLoader:
 
         self.train_tf = self.train_tf or _tf(True, self.img_size, self.use_trivial_augment)
         self.eval_tf  = self.eval_tf  or _tf(False, self.img_size, self.use_trivial_augment)
+        self.generator = torch.Generator().manual_seed(self.seed) if self.seed is not None else None
+
+    def _seed_worker(self, worker_id: int):
+        if self.seed is None:
+            return
+        worker_seed = self.seed + worker_id
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
 
     def _loader(self, split: str, mode: str):
         ds = HIPPASet(
@@ -132,6 +145,8 @@ class HIPPADataLoader:
             ds, batch_size=self.batch_size, shuffle=(split == "train"),
             num_workers=self.num_workers, pin_memory=self.pin_memory,
             drop_last=(self.drop_last and split == "train"),
+            worker_init_fn=self._seed_worker if self.seed is not None else None,
+            generator=self.generator,
         )
 
     def dataloader_image(self, split: str = "train"): return self._loader(split, "img")

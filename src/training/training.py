@@ -7,12 +7,15 @@ import json
 import os
 import shutil
 import sys
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
+import numpy as np
 import torch
 from sklearn.metrics import confusion_matrix
+from torch.utils.tensorboard import SummaryWriter
 
 try:  # Headless-safe plotting
     import matplotlib
@@ -51,6 +54,17 @@ def _write_text(path: Path, content: str) -> None:
     print(f"[save] {path}")
 
 
+def set_reproducibility(seed: int) -> None:
+    """Set seeds and deterministic flags for reproducible runs."""
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def _build_optimizer(name: str, params, lr: float) -> torch.optim.Optimizer:
     name = name.lower()
     if name == "adam":
@@ -72,6 +86,10 @@ def run_single_experiment(
 ) -> Dict[str, Any]:
     """Train one hyperparameter combo and save artifacts."""
     combo_dir.mkdir(parents=True, exist_ok=True)
+
+    seed = base_hparams.get("seed")
+    if seed is not None:
+        set_reproducibility(int(seed))
 
     model_kwargs = {
         "model_name": base_hparams["model_name"],
@@ -96,10 +114,42 @@ def run_single_experiment(
     optimizer = _build_optimizer(base_hparams["optimizer"], model.parameters(), base_hparams["learning_rate"])
     loss_fn = torch.nn.CrossEntropyLoss()
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=2)
+    writer = SummaryWriter(log_dir=combo_dir / "tensorboard")
+
+    def _log_graph():
+        """Try to add a model graph to TensorBoard using one sample batch."""
+        try:
+            sample_batch = next(iter(train_loader))
+        except StopIteration:
+            return
+        mode = getattr(getattr(train_loader, "dataset", None), "mode", None)
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            try:
+                if mode == "img_cult":
+                    x, cult, *_ = sample_batch
+                    writer.add_graph(model, (x.to(device), cult.to(device)))
+                elif mode == "img_prog":
+                    x, prog, *_ = sample_batch
+                    writer.add_graph(model, (x.to(device), None, prog.to(device)))
+                elif mode == "img_prog_cult":
+                    x, prog, cult, *_ = sample_batch
+                    writer.add_graph(model, (x.to(device), cult.to(device), prog.to(device)))
+                else:
+                    x, *_ = sample_batch
+                    writer.add_graph(model, (x.to(device),))
+                writer.flush()
+            except Exception as exc:  # pragma: no cover - graph logging is best effort
+                print(f"[warn] Skipping graph logging: {exc}")
+        if was_training:
+            model.train()
 
     print("Hyperparameters for this run:")
     for k, v in base_hparams.items():
         print(f"  {k}: {v}")
+
+    _log_graph()
 
     def _epoch_save(epoch_idx: int, history: Dict[str, List[float]], state_dict: Dict[str, torch.Tensor]):
         latest_path = combo_dir / "latest_checkpoint.pth"
@@ -129,7 +179,9 @@ def run_single_experiment(
         early_stopping_patience=5,
         epoch_save_fn=_epoch_save,
         forward_fn=forward_fn,
+        writer=writer,
     )
+    writer.close()
 
     # Load best weights for evaluation/pred logging.
     best_state = train_result.get("best_state_dict")
@@ -380,6 +432,7 @@ def main():
         "num_workers": worker_count, 
         "pin_memory": False,
         "drop_last": False,
+        "seed": 42,
         "strict_csv_match": False,
         "use_trivial_augment": True,
         "learning_rate": 1e-4,
@@ -390,12 +443,15 @@ def main():
     }
     run_root = results_root / f"conv4dcnn_fusion_grid_{ts}"
 
+    set_reproducibility(base_hparams["seed"])
+
     data = HIPPADataLoader(
         image_dir=data_root,
         csv_path=csv_path,
         batch_size=base_hparams["batch_size"],
         img_size=base_hparams["img_size"],
         num_workers=base_hparams["num_workers"],
+        seed=base_hparams["seed"],
         pin_memory=base_hparams["pin_memory"],
         drop_last=base_hparams["drop_last"],
         strict_csv_match=base_hparams["strict_csv_match"],
@@ -425,7 +481,7 @@ def main():
         ])
     grid = {
         "dropout": [0.3],
-        "learning_rate": [1e-2, 5e-4, 1e-4],
+        "learning_rate": [3e-4, 1e-4, 3e-5],
         "optimizer": ["Adam"],
     }
 # "optimizer": ["Adam", "AdamW"],
