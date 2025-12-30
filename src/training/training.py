@@ -471,13 +471,17 @@ def main():
     }
     fusion_modes = ("concat", "sum", "prod", "concat+sum+prod")
     variants = [
-        {"name": "conv4_pure", "model_name": "conv4dcnn", "mode": "img", "fusion_mode": None},
+        # {"name": "conv4_pure", "model_name": "conv4dcnn", "mode": "img", "fusion_mode": None},
+        {"name": "resnet152_pure", "model_name": "resnet152", "mode": "img", "fusion_mode": None},
     ]
     for fm in fusion_modes:
         variants.extend([
-            {"name": f"conv4_cult_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_cult", "fusion_mode": fm},
-            {"name": f"conv4_prog_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_prog", "fusion_mode": fm},
-            {"name": f"conv4_both_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
+            # {"name": f"conv4_cult_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_cult", "fusion_mode": fm},
+            # {"name": f"conv4_prog_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_prog", "fusion_mode": fm},
+            # {"name": f"conv4_both_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
+            {"name": f"res152_cult_{fm}", "model_name": "resnet152_latefusion", "mode": "img_cult", "fusion_mode": fm},
+            {"name": f"res152_prog_{fm}", "model_name": "resnet152_latefusion", "mode": "img_prog", "fusion_mode": fm},
+            {"name": f"res152_both_{fm}", "model_name": "resnet152_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
         ])
     grid = {
         "dropout": [0.3],
@@ -487,6 +491,9 @@ def main():
 # "optimizer": ["Adam", "AdamW"],
     run_root.mkdir(parents=True, exist_ok=True)
     run_summaries: List[Dict[str, Any]] = []
+    total_combos = len(variants) * len(grid["dropout"]) * len(grid["learning_rate"]) * len(grid["optimizer"])
+    completed = 0
+    print(f"Planned grid combos: {total_combos}")
 
     for variant in variants:
         mode = variant["mode"]
@@ -531,6 +538,8 @@ def main():
                         "final_val_acc": result.get("history", {}).get("val_acc", [])[-1] if result.get("history", {}).get("val_acc") else None,
                         "hparams": {"dropout": dropout, "learning_rate": lr, "optimizer": opt_name, "fusion_mode": fusion_mode},
                     })
+                    completed += 1
+                    print(f"[progress] Completed {completed}/{total_combos} combos ({total_combos - completed} remaining)")
 
     best_run = None
     loss_ranked = [r for r in run_summaries if r.get("best_val_loss") is not None]
