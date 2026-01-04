@@ -472,16 +472,20 @@ def main():
     fusion_modes = ("concat", "sum", "prod", "concat+sum+prod")
     variants = [
         # {"name": "conv4_pure", "model_name": "conv4dcnn", "mode": "img", "fusion_mode": None},
-        {"name": "resnet152_pure", "model_name": "resnet152", "mode": "img", "fusion_mode": None},
+        {"name": "resnet18_pure", "model_name": "resnet18", "mode": "img", "fusion_mode": None},
+        # {"name": "resnet152_pure", "model_name": "resnet152", "mode": "img", "fusion_mode": None},
     ]
     for fm in fusion_modes:
         variants.extend([
             # {"name": f"conv4_cult_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_cult", "fusion_mode": fm},
             # {"name": f"conv4_prog_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_prog", "fusion_mode": fm},
             # {"name": f"conv4_both_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
-            {"name": f"res152_cult_{fm}", "model_name": "resnet152_latefusion", "mode": "img_cult", "fusion_mode": fm},
-            {"name": f"res152_prog_{fm}", "model_name": "resnet152_latefusion", "mode": "img_prog", "fusion_mode": fm},
-            {"name": f"res152_both_{fm}", "model_name": "resnet152_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
+            {"name": f"res18_cult_{fm}", "model_name": "resnet18_latefusion", "mode": "img_cult", "fusion_mode": fm},
+            {"name": f"res18_prog_{fm}", "model_name": "resnet18_latefusion", "mode": "img_prog", "fusion_mode": fm},
+            {"name": f"res18_both_{fm}", "model_name": "resnet18_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
+            # {"name": f"res152_cult_{fm}", "model_name": "resnet152_latefusion", "mode": "img_cult", "fusion_mode": fm},
+            # {"name": f"res152_prog_{fm}", "model_name": "resnet152_latefusion", "mode": "img_prog", "fusion_mode": fm},
+            # {"name": f"res152_both_{fm}", "model_name": "resnet152_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
         ])
     grid = {
         "dropout": [0.3],

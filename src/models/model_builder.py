@@ -109,6 +109,43 @@ class ResNet152Classifier(nn.Module):
         return self.model(x)
 
 
+class ResNet18Classifier(nn.Module):
+    """ResNet18 backbone with optional dropout; all layers are trainable."""
+
+    def __init__(
+        self,
+        *,
+        in_channels: int,
+        num_classes: int,
+        img_size: int,
+        hidden_dim: int,  # kept for signature compatibility
+        dropout: float,
+        pretrained: bool = True,
+    ):
+        super().__init__()
+        weights = tv_models.ResNet18_Weights.DEFAULT if pretrained else None
+        self.model = tv_models.resnet18(weights=weights)
+
+        for param in self.model.parameters():
+            param.requires_grad = True
+
+        if in_channels != self.model.conv1.in_channels:
+            raise ValueError(f"ResNet18 expects {self.model.conv1.in_channels} input channels; got {in_channels}")
+
+        in_features = self.model.fc.in_features
+        layers = [
+            nn.Linear(in_features, hidden_dim),
+            nn.ReLU(inplace=True),
+        ]
+        if dropout > 0:
+            layers.append(nn.Dropout(p=dropout))
+        layers.append(nn.Linear(hidden_dim, num_classes))
+        self.model.fc = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
 class ResNet152LateFusion(nn.Module):
     """ResNet152 backbone feeding a LateFusionHead; all layers are trainable."""
 
@@ -164,10 +201,66 @@ class ResNet152LateFusion(nn.Module):
         return self.head(feats, cultivar_ids=cultivar_ids, progression_ids=progression_ids)
 
 
+class ResNet18LateFusion(nn.Module):
+    """ResNet18 backbone feeding a LateFusionHead; all layers are trainable."""
+
+    def __init__(
+        self,
+        *,
+        in_channels: int,
+        num_classes: int,
+        img_size: int,
+        hidden_dim: int,  # should be 512 for ResNet18 penultimate features
+        dropout: float,
+        num_cultivars: int | None = None,
+        num_progressions: int | None = None,
+        fusion_mode: str = "concat+sum+prod",
+        pretrained: bool = True,
+    ):
+        super().__init__()
+        weights = tv_models.ResNet18_Weights.DEFAULT if pretrained else None
+        self.backbone = tv_models.resnet18(weights=weights)
+
+        if in_channels != self.backbone.conv1.in_channels:
+            raise ValueError(f"ResNet18 expects {self.backbone.conv1.in_channels} input channels; got {in_channels}")
+        if hidden_dim != 512:
+            raise ValueError(f"ResNet18LateFusion expects hidden_dim=512 (got {hidden_dim}) to match the penultimate layer width")
+
+        for param in self.backbone.parameters():
+            param.requires_grad = True
+
+        feat_dim = self.backbone.fc.in_features if isinstance(self.backbone.fc, nn.Linear) else 512
+        self.backbone.fc = nn.Identity()
+        proj_layers = [nn.Linear(feat_dim, hidden_dim), nn.ReLU(inplace=True)]
+        if dropout > 0:
+            proj_layers.append(nn.Dropout(p=dropout))
+        self.proj = nn.Sequential(*proj_layers)
+        self.head = LateFusionHead(
+            feat_dim=hidden_dim,
+            num_classes=num_classes,
+            num_cultivars=num_cultivars,
+            num_progressions=num_progressions,
+            fusion_mode=fusion_mode,
+            dropout=dropout,
+        )
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        cultivar_ids: torch.Tensor | None = None,
+        progression_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        feats = self.backbone(images)
+        feats = self.proj(feats)
+        return self.head(feats, cultivar_ids=cultivar_ids, progression_ids=progression_ids)
+
+
 _MODEL_REGISTRY = {
     "conv4dcnn": Conv4DCNN,
     "resnet152": ResNet152Classifier,
+    "resnet18": ResNet18Classifier,
     "resnet152_latefusion": ResNet152LateFusion,
+    "resnet18_latefusion": ResNet18LateFusion,
 }
 
 
