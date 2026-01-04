@@ -7,6 +7,7 @@ import torch.nn as nn
 from torchvision import models as tv_models
 
 from models.late_fusion_embeddings import LateFusionHead
+from models.tian_msd_model import TianMSDNet
 
 
 class Conv4DCNN(nn.Module):
@@ -146,6 +147,36 @@ class ResNet18Classifier(nn.Module):
         return self.model(x)
 
 
+class TianMSDClassifier(nn.Module):
+    """Tian Multi-scale Dense Inception classifier (two backbone variants)."""
+
+    def __init__(
+        self,
+        *,
+        in_channels: int,
+        num_classes: int,
+        img_size: int,  # kept for signature compatibility; Tian uses 299x299
+        hidden_dim: int,  # unused
+        dropout: float,
+        variant: str = "msd_inception_resnet_v2",
+        growth: int = 128,
+        pretrained: bool = True,
+    ):
+        super().__init__()
+        if in_channels != 3:
+            raise ValueError(f"TianMSD expects 3-channel RGB input; got {in_channels}")
+        self.model = TianMSDNet(
+            variant=variant,
+            num_classes=num_classes,
+            growth=growth,
+            dropout=dropout,
+            pretrained=pretrained,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
 class ResNet152LateFusion(nn.Module):
     """ResNet152 backbone feeding a LateFusionHead; all layers are trainable."""
 
@@ -255,12 +286,70 @@ class ResNet18LateFusion(nn.Module):
         return self.head(feats, cultivar_ids=cultivar_ids, progression_ids=progression_ids)
 
 
+class TianMSDLateFusion(nn.Module):
+    """Tian MSD backbone + LateFusion head; backbone stays trainable."""
+
+    def __init__(
+        self,
+        *,
+        in_channels: int,
+        num_classes: int,
+        img_size: int,  # kept for signature compatibility; Tian uses 299x299
+        hidden_dim: int,  # unused
+        dropout: float,
+        num_cultivars: int | None = None,
+        num_progressions: int | None = None,
+        fusion_mode: str = "concat+sum+prod",
+        variant: str = "msd_inception_resnet_v2",
+        growth: int = 128,
+        pretrained: bool = True,
+    ):
+        super().__init__()
+        if in_channels != 3:
+            raise ValueError(f"TianMSD expects 3-channel RGB input; got {in_channels}")
+        self.backbone = TianMSDNet(
+            variant=variant,
+            num_classes=num_classes,
+            growth=growth,
+            dropout=dropout,
+            pretrained=pretrained,
+        )
+        self.num_classes = num_classes
+        self.num_cultivars = num_cultivars
+        self.num_progressions = num_progressions
+        self.fusion_mode = fusion_mode
+        self.dropout = dropout
+        self.head: LateFusionHead | None = None
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        cultivar_ids: torch.Tensor | None = None,
+        progression_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        feats = self.backbone.forward_features(images)
+        if self.head is None:
+            self.head = LateFusionHead(
+                feat_dim=feats.shape[1],
+                num_classes=self.num_classes,
+                num_cultivars=self.num_cultivars,
+                num_progressions=self.num_progressions,
+                fusion_mode=self.fusion_mode,
+                dropout=self.dropout,
+            ).to(feats.device)
+        return self.head(feats, cultivar_ids=cultivar_ids, progression_ids=progression_ids)
+
+
 _MODEL_REGISTRY = {
     "conv4dcnn": Conv4DCNN,
     "resnet152": ResNet152Classifier,
     "resnet18": ResNet18Classifier,
     "resnet152_latefusion": ResNet152LateFusion,
     "resnet18_latefusion": ResNet18LateFusion,
+    "tian_msd_irv2": lambda **kw: TianMSDClassifier(variant="msd_inception_resnet_v2", **kw),
+    "tian_msd_v4": lambda **kw: TianMSDClassifier(variant="msd_inception_v4", **kw),
+    "tian_msd_irv2_latefusion": lambda **kw: TianMSDLateFusion(variant="msd_inception_resnet_v2", **kw),
+    "tian_msd_v4_latefusion": lambda **kw: TianMSDLateFusion(variant="msd_inception_v4", **kw),
 }
 
 

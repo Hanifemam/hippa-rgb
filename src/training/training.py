@@ -99,7 +99,7 @@ def run_single_experiment(
         "hidden_dim": base_hparams["hidden_dim"],
         "dropout": base_hparams["dropout"],
     }
-    for opt_key in ("num_cultivars", "num_progressions", "fusion_mode"):
+    for opt_key in ("num_cultivars", "num_progressions", "fusion_mode", "pretrained", "growth"):
         if opt_key in base_hparams and base_hparams[opt_key] is not None:
             model_kwargs[opt_key] = base_hparams[opt_key]
     model = build_model(**model_kwargs).to(device)
@@ -118,6 +118,8 @@ def run_single_experiment(
 
     def _log_graph():
         """Try to add a model graph to TensorBoard using one sample batch."""
+        if base_hparams.get("model_name", "").startswith("tian_msd"):
+            return  # skip tracing for lazy-built Tian head (graph-only)
         try:
             sample_batch = next(iter(train_loader))
         except StopIteration:
@@ -424,7 +426,7 @@ def main():
         "model_name": "conv4dcnn",
         "image_dir": str(data_root),
         "csv_path": str(csv_path),
-        "batch_size": 32,
+        "batch_size": 16,
         "img_size": 224,
         "in_channels": 3,
         "hidden_dim": 512,
@@ -441,38 +443,20 @@ def main():
         "loss_fn": "CrossEntropyLoss",
         "device": str(device),
     }
-    run_root = results_root / f"conv4dcnn_fusion_grid_{ts}"
-
-    set_reproducibility(base_hparams["seed"])
-
-    data = HIPPADataLoader(
-        image_dir=data_root,
-        csv_path=csv_path,
-        batch_size=base_hparams["batch_size"],
-        img_size=base_hparams["img_size"],
-        num_workers=base_hparams["num_workers"],
-        seed=base_hparams["seed"],
-        pin_memory=base_hparams["pin_memory"],
-        drop_last=base_hparams["drop_last"],
-        strict_csv_match=base_hparams["strict_csv_match"],
-        use_trivial_augment=base_hparams["use_trivial_augment"],
-    )
     forward_map = {
         "img": _forward_factory("img"),
         "img_cult": _forward_factory("img_cult"),
         "img_prog": _forward_factory("img_prog"),
         "img_prog_cult": _forward_factory("img_prog_cult"),
     }
-    loader_map = {
-        "img": data.dataloader_image,
-        "img_cult": data.dataloader_image_cultivar,
-        "img_prog": data.dataloader_image_progression,
-        "img_prog_cult": data.dataloader_image_progression_cultivar,
-    }
     fusion_modes = ("concat", "sum", "prod", "concat+sum+prod")
     variants = [
         # {"name": "conv4_pure", "model_name": "conv4dcnn", "mode": "img", "fusion_mode": None},
-        {"name": "resnet18_pure", "model_name": "resnet18", "mode": "img", "fusion_mode": None},
+        # {"name": "resnet18_pure", "model_name": "resnet18", "mode": "img", "fusion_mode": None},
+        {"name": "tian_irv2_pure", "model_name": "tian_msd_irv2", "mode": "img", "fusion_mode": None,
+         "img_size": 299, "dropout_override": 0.8, "pretrained": True},
+        # {"name": "tian_v4_pure", "model_name": "tian_msd_v4", "mode": "img", "fusion_mode": None,
+        #  "img_size": 299, "dropout_override": 0.8, "pretrained": False},
         # {"name": "resnet152_pure", "model_name": "resnet152", "mode": "img", "fusion_mode": None},
     ]
     for fm in fusion_modes:
@@ -480,9 +464,21 @@ def main():
             # {"name": f"conv4_cult_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_cult", "fusion_mode": fm},
             # {"name": f"conv4_prog_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_prog", "fusion_mode": fm},
             # {"name": f"conv4_both_{fm}", "model_name": "conv4dcnn_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
-            {"name": f"res18_cult_{fm}", "model_name": "resnet18_latefusion", "mode": "img_cult", "fusion_mode": fm},
-            {"name": f"res18_prog_{fm}", "model_name": "resnet18_latefusion", "mode": "img_prog", "fusion_mode": fm},
-            {"name": f"res18_both_{fm}", "model_name": "resnet18_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
+            # {"name": f"res18_cult_{fm}", "model_name": "resnet18_latefusion", "mode": "img_cult", "fusion_mode": fm},
+            # {"name": f"res18_prog_{fm}", "model_name": "resnet18_latefusion", "mode": "img_prog", "fusion_mode": fm},
+            # {"name": f"res18_both_{fm}", "model_name": "resnet18_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
+            {"name": f"tian_irv2_cult_{fm}", "model_name": "tian_msd_irv2_latefusion", "mode": "img_cult",
+             "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": True},
+            {"name": f"tian_irv2_prog_{fm}", "model_name": "tian_msd_irv2_latefusion", "mode": "img_prog",
+             "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": True},
+            {"name": f"tian_irv2_both_{fm}", "model_name": "tian_msd_irv2_latefusion", "mode": "img_prog_cult",
+             "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": True},
+            # {"name": f"tian_v4_cult_{fm}", "model_name": "tian_msd_v4_latefusion", "mode": "img_cult",
+            #  "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": False},
+            # {"name": f"tian_v4_prog_{fm}", "model_name": "tian_msd_v4_latefusion", "mode": "img_prog",
+            #  "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": False},
+            # {"name": f"tian_v4_both_{fm}", "model_name": "tian_msd_v4_latefusion", "mode": "img_prog_cult",
+            #  "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": False},
             # {"name": f"res152_cult_{fm}", "model_name": "resnet152_latefusion", "mode": "img_cult", "fusion_mode": fm},
             # {"name": f"res152_prog_{fm}", "model_name": "resnet152_latefusion", "mode": "img_prog", "fusion_mode": fm},
             # {"name": f"res152_both_{fm}", "model_name": "resnet152_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
@@ -492,7 +488,21 @@ def main():
         "learning_rate": [3e-4, 1e-4, 3e-5],
         "optimizer": ["Adam"],
     }
-# "optimizer": ["Adam", "AdamW"],
+    # "optimizer": ["Adam", "AdamW"],
+    run_root = results_root / f"hippa_grid_{ts}"
+    loader_kwargs = {
+        "image_dir": data_root,
+        "csv_path": csv_path,
+        "batch_size": base_hparams["batch_size"],
+        "num_workers": base_hparams["num_workers"],
+        "seed": base_hparams["seed"],
+        "pin_memory": base_hparams["pin_memory"],
+        "drop_last": base_hparams["drop_last"],
+        "strict_csv_match": base_hparams["strict_csv_match"],
+        "use_trivial_augment": base_hparams["use_trivial_augment"],
+    }
+
+    set_reproducibility(base_hparams["seed"])
     run_root.mkdir(parents=True, exist_ok=True)
     run_summaries: List[Dict[str, Any]] = []
     total_combos = len(variants) * len(grid["dropout"]) * len(grid["learning_rate"]) * len(grid["optimizer"])
@@ -502,21 +512,31 @@ def main():
     for variant in variants:
         mode = variant["mode"]
         fusion_mode = variant["fusion_mode"]
+        img_size = variant.get("img_size", base_hparams["img_size"])
+        data = HIPPADataLoader(img_size=img_size, **loader_kwargs)
+        loader_map = {
+            "img": data.dataloader_image,
+            "img_cult": data.dataloader_image_cultivar,
+            "img_prog": data.dataloader_image_progression,
+            "img_prog_cult": data.dataloader_image_progression_cultivar,
+        }
         train_loader = loader_map[mode]("train")
         val_loader = loader_map[mode]("val")
         for dropout in grid["dropout"]:
+            drop_val = variant.get("dropout_override", dropout)
             for lr in grid["learning_rate"]:
                 for opt_name in grid["optimizer"]:
-                    combo_name = f"{variant['name']}_drop{dropout}_lr{lr}_opt{opt_name.replace('+','').lower()}"
+                    combo_name = f"{variant['name']}_drop{drop_val}_lr{lr}_opt{opt_name.replace('+','').lower()}"
                     combo_dir = run_root / combo_name
                     hparams = dict(base_hparams)
                     hparams.update({
                         "model_name": variant["model_name"],
-                        "dropout": dropout,
+                        "dropout": drop_val,
                         "learning_rate": lr,
                         "optimizer": opt_name,
                         "class_to_idx": data.label2id,
                         "num_classes": len(data.label2id),
+                        "img_size": img_size,
                     })
                     if fusion_mode is not None:
                         hparams["fusion_mode"] = fusion_mode
@@ -524,6 +544,8 @@ def main():
                         hparams["num_cultivars"] = len(data.cultivar2id)
                     if "prog" in mode:
                         hparams["num_progressions"] = len(data.progression2id)
+                    if "pretrained" in variant:
+                        hparams["pretrained"] = variant["pretrained"]
                     print(f"\n=== Running combo: {combo_name} ===")
                     result = run_single_experiment(
                         combo_dir,
@@ -540,7 +562,7 @@ def main():
                         "best_val_loss": result.get("best_val_loss"),
                         "best_epoch": result.get("best_epoch"),
                         "final_val_acc": result.get("history", {}).get("val_acc", [])[-1] if result.get("history", {}).get("val_acc") else None,
-                        "hparams": {"dropout": dropout, "learning_rate": lr, "optimizer": opt_name, "fusion_mode": fusion_mode},
+                        "hparams": {"dropout": drop_val, "learning_rate": lr, "optimizer": opt_name, "fusion_mode": fusion_mode},
                     })
                     completed += 1
                     print(f"[progress] Completed {completed}/{total_combos} combos ({total_combos - completed} remaining)")
