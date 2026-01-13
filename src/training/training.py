@@ -426,7 +426,7 @@ def main():
         "model_name": "conv4dcnn",
         "image_dir": str(data_root),
         "csv_path": str(csv_path),
-        "batch_size": 16,
+        "batch_size": 8, # For tian_irv2_pure, sum, product, concat it should be 16 for the other models 32. For tian_irv2 concat+sum+prod batch size should 8
         "img_size": 224,
         "in_channels": 3,
         "hidden_dim": 512,
@@ -453,10 +453,8 @@ def main():
     variants = [
         # {"name": "conv4_pure", "model_name": "conv4dcnn", "mode": "img", "fusion_mode": None},
         # {"name": "resnet18_pure", "model_name": "resnet18", "mode": "img", "fusion_mode": None},
-        {"name": "tian_irv2_pure", "model_name": "tian_msd_irv2", "mode": "img", "fusion_mode": None,
-         "img_size": 299, "dropout_override": 0.8, "pretrained": True},
-        # {"name": "tian_v4_pure", "model_name": "tian_msd_v4", "mode": "img", "fusion_mode": None,
-        #  "img_size": 299, "dropout_override": 0.8, "pretrained": False},
+        # {"name": "tian_irv2_pure", "model_name": "tian_msd_irv2", "mode": "img", "fusion_mode": None, "img_size": 299, "dropout_override": 0.3, "pretrained": True}, # Dropout set 0.3 although the original paper is 0.8 to compensate not using pretrained model. We use pretraind model
+        {"name": "tian_v4_pure", "model_name": "tian_msd_v4", "mode": "img", "fusion_mode": None, "img_size": 299, "dropout_override": 0.3, "pretrained": True},
         # {"name": "resnet152_pure", "model_name": "resnet152", "mode": "img", "fusion_mode": None},
     ]
     for fm in fusion_modes:
@@ -467,18 +465,18 @@ def main():
             # {"name": f"res18_cult_{fm}", "model_name": "resnet18_latefusion", "mode": "img_cult", "fusion_mode": fm},
             # {"name": f"res18_prog_{fm}", "model_name": "resnet18_latefusion", "mode": "img_prog", "fusion_mode": fm},
             # {"name": f"res18_both_{fm}", "model_name": "resnet18_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},
-            {"name": f"tian_irv2_cult_{fm}", "model_name": "tian_msd_irv2_latefusion", "mode": "img_cult",
-             "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": True},
-            {"name": f"tian_irv2_prog_{fm}", "model_name": "tian_msd_irv2_latefusion", "mode": "img_prog",
-             "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": True},
-            {"name": f"tian_irv2_both_{fm}", "model_name": "tian_msd_irv2_latefusion", "mode": "img_prog_cult",
-             "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": True},
-            # {"name": f"tian_v4_cult_{fm}", "model_name": "tian_msd_v4_latefusion", "mode": "img_cult",
-            #  "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": False},
-            # {"name": f"tian_v4_prog_{fm}", "model_name": "tian_msd_v4_latefusion", "mode": "img_prog",
-            #  "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": False},
-            # {"name": f"tian_v4_both_{fm}", "model_name": "tian_msd_v4_latefusion", "mode": "img_prog_cult",
-            #  "fusion_mode": fm, "img_size": 299, "dropout_override": 0.8, "pretrained": False},
+            # {"name": f"tian_irv2_cult_{fm}", "model_name": "tian_msd_irv2_latefusion", "mode": "img_cult",
+            #  "fusion_mode": fm, "img_size": 299, "dropout_override": 0.3, "pretrained": True}, # Dropout set 0.3 although the original paper is 0.8 to compensate not using pretrained model. We use pretraind model
+            # {"name": f"tian_irv2_prog_{fm}", "model_name": "tian_msd_irv2_latefusion", "mode": "img_prog",
+            #  "fusion_mode": fm, "img_size": 299, "dropout_override": 0.3, "pretrained": True}, # Dropout set 0.3 although the original paper is 0.8 to compensate not using pretrained model. We use pretraind model
+            # {"name": f"tian_irv2_both_{fm}", "model_name": "tian_msd_irv2_latefusion", "mode": "img_prog_cult",
+            #  "fusion_mode": fm, "img_size": 299, "dropout_override": 0.3, "pretrained": True}, # Dropout set 0.3 although the original paper is 0.8 to compensate not using pretrained model. We use pretraind model
+            {"name": f"tian_v4_cult_{fm}", "model_name": "tian_msd_v4_latefusion", "mode": "img_cult",
+             "fusion_mode": fm, "img_size": 299, "dropout_override": 0.3, "pretrained": True}, # Dropout set 0.3 although the original paper is 0.8 to compensate not using pretrained model. We use pretraind model
+            {"name": f"tian_v4_prog_{fm}", "model_name": "tian_msd_v4_latefusion", "mode": "img_prog",
+             "fusion_mode": fm, "img_size": 299, "dropout_override": 0.3, "pretrained": True}, # Dropout set 0.3 although the original paper is 0.8 to compensate not using pretrained model. We use pretraind model
+            {"name": f"tian_v4_both_{fm}", "model_name": "tian_msd_v4_latefusion", "mode": "img_prog_cult",
+             "fusion_mode": fm, "img_size": 299, "dropout_override": 0.3, "pretrained": True}, # Dropout set 0.3 although the original paper is 0.8 to compensate not using pretrained model. We use pretraind model
             # {"name": f"res152_cult_{fm}", "model_name": "resnet152_latefusion", "mode": "img_cult", "fusion_mode": fm},
             # {"name": f"res152_prog_{fm}", "model_name": "resnet152_latefusion", "mode": "img_prog", "fusion_mode": fm},
             # {"name": f"res152_both_{fm}", "model_name": "resnet152_latefusion", "mode": "img_prog_cult", "fusion_mode": fm},

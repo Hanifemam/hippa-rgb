@@ -58,6 +58,18 @@ class DenseRepeatStage(nn.Module):
         self.out_ch: int | None = None
         self.last_cur: torch.Tensor | None = None
 
+    @staticmethod
+    def _align_prev(prev: list[torch.Tensor], target_hw: tuple[int, int]) -> list[torch.Tensor]:
+        """Align spatial sizes for safe dense concatenation if a reduction slips in."""
+        if all(p.shape[-2:] == target_hw for p in prev):
+            return prev
+        aligned: list[torch.Tensor] = []
+        for p in prev:
+            if p.shape[-2:] != target_hw:
+                p = F.interpolate(p, size=target_hw, mode="bilinear", align_corners=False)
+            aligned.append(p)
+        return aligned
+
     @torch.no_grad()
     def _build(self, x: torch.Tensor) -> None:
         device = x.device
@@ -69,17 +81,18 @@ class DenseRepeatStage(nn.Module):
             hi = HiTransform(y.shape[1], self.growth).to(device)
             self.hi.append(hi)
 
-            dense_ch = (len(prev) + 1) * self.growth
+            z = hi(y)
+            prev.append(z)
+
+            dense_ch = len(prev) * self.growth
             adapt = nn.Sequential(
                 nn.Conv2d(dense_ch, y.shape[1], 1, bias=False),
                 nn.BatchNorm2d(y.shape[1]),
                 nn.ReLU(inplace=True),
             ).to(device)
             self.adapters.append(adapt)
-
-            z = hi(y)
-            prev.append(z)
-            cur = adapt(torch.cat(prev, dim=1))
+            cat_prev = self._align_prev(prev, z.shape[-2:])
+            cur = adapt(torch.cat(cat_prev, dim=1))
 
         self.out_ch = len(prev) * self.growth
         self._built = True
@@ -94,10 +107,12 @@ class DenseRepeatStage(nn.Module):
             y = blk(cur)
             z = hi(y)
             prev.append(z)
-            cur = adapt(torch.cat(prev, dim=1))
+            cat_prev = self._align_prev(prev, z.shape[-2:])
+            cur = adapt(torch.cat(cat_prev, dim=1))
 
         self.last_cur = cur
-        return torch.cat(prev, dim=1)
+        cat_prev = self._align_prev(prev, prev[-1].shape[-2:])
+        return torch.cat(cat_prev, dim=1)
 
 
 class MultiScaleHead(nn.Module):
@@ -168,23 +183,61 @@ class MultiScaleHead(nn.Module):
 # Backbone decomposition helpers (timm) — robust across versions
 # ------------------------------------------------------------
 def _split_inception_v4(model):
+    def _is_red_a(name: str) -> bool:
+        return any(tag in name for tag in ("reductiona", "reduction_a", "mixed_6a", "mixed6a"))
+
+    def _is_red_b(name: str) -> bool:
+        return any(tag in name for tag in ("reductionb", "reduction_b", "mixed_7a", "mixed7a"))
+
+    def _iter_blocks(blocks):
+        for blk in blocks:
+            if isinstance(blk, nn.Sequential):
+                for child in blk.children():
+                    yield child
+            else:
+                yield blk
+
     # Most timm versions expose `features` as a Sequential
     if hasattr(model, "features"):
         feats = list(model.features.children())
-        if len(feats) < 6:
+        if len(feats) < 2:
             raise ValueError("Unexpected InceptionV4 'features' layout.")
         stem = feats[0]
-        A, redA, B, redB, C = feats[1:6]
-        return stem, list(A.children()), redA, list(B.children()), redB, list(C.children())
+        A: list[nn.Module] = []
+        B: list[nn.Module] = []
+        C: list[nn.Module] = []
+        redA = redB = None
+        current = A
+
+        for blk in _iter_blocks(feats[1:]):
+            name = blk.__class__.__name__.lower()
+            if _is_red_a(name):
+                redA = blk
+                current = B
+                continue
+            if _is_red_b(name):
+                redB = blk
+                current = C
+                continue
+            current.append(blk)
+
+        if redA is not None and redB is not None:
+            return stem, A, redA, B, redB, C
+
+        if len(feats) >= 6:
+            A, redA, B, redB, C = feats[1:6]
+            return stem, list(A.children()), redA, list(B.children()), redB, list(C.children())
+
+        raise ValueError("Could not locate reduction blocks in InceptionV4 'features' layout.")
 
     # Some versions expose stem + named groups
     if hasattr(model, "stem"):
         if hasattr(model, "inception_a") and hasattr(model, "inception_b") and hasattr(model, "inception_c"):
             stem = model.stem
             A = list(getattr(model, "inception_a", nn.Sequential()).children())
-            redA = getattr(model, "reduction_a", None)
+            redA = getattr(model, "reduction_a", None) or getattr(model, "mixed_6a", None)
             B = list(getattr(model, "inception_b", nn.Sequential()).children())
-            redB = getattr(model, "reduction_b", None)
+            redB = getattr(model, "reduction_b", None) or getattr(model, "mixed_7a", None)
             C = list(getattr(model, "inception_c", nn.Sequential()).children())
             if redA is None or redB is None:
                 raise ValueError("Could not locate reduction blocks in InceptionV4.")
@@ -204,11 +257,11 @@ def _split_inception_v4(model):
 
     for blk in blocks:
         name = blk.__class__.__name__.lower()
-        if "reductiona" in name or "reduction_a" in name:
+        if _is_red_a(name):
             redA = blk
             current = B
             continue
-        if "reductionb" in name or "reduction_b" in name:
+        if _is_red_b(name):
             redB = blk
             current = C
             continue
@@ -220,14 +273,46 @@ def _split_inception_v4(model):
 
 
 def _split_inception_resnet_v2(model):
+    def _iter_blocks(blocks):
+        for blk in blocks:
+            if isinstance(blk, nn.Sequential):
+                for child in blk.children():
+                    yield child
+            else:
+                yield blk
+
     # Common timm layout: features Sequential
     if hasattr(model, "features"):
         feats = list(model.features.children())
-        if len(feats) < 6:
+        if len(feats) < 2:
             raise ValueError("Unexpected InceptionResNetV2 'features' layout.")
         stem = feats[0]
-        A, redA, B, redB, C = feats[1:6]
-        return stem, list(A.children()), redA, list(B.children()), redB, list(C.children())
+        A: list[nn.Module] = []
+        B: list[nn.Module] = []
+        C: list[nn.Module] = []
+        redA = redB = None
+        current = A
+
+        for blk in _iter_blocks(feats[1:]):
+            name = blk.__class__.__name__.lower()
+            if "mixed_6a" in name or "reductiona" in name or "reduction_a" in name:
+                redA = blk
+                current = B
+                continue
+            if "mixed_7a" in name or "reductionb" in name or "reduction_b" in name:
+                redB = blk
+                current = C
+                continue
+            current.append(blk)
+
+        if redA is not None and redB is not None:
+            return stem, A, redA, B, redB, C
+
+        if len(feats) >= 6:
+            A, redA, B, redB, C = feats[1:6]
+            return stem, list(A.children()), redA, list(B.children()), redB, list(C.children())
+
+        raise ValueError("Could not locate reduction blocks in InceptionResNetV2 'features' layout.")
 
     # timm exposes explicit repeat/mixed blocks in some versions
     if hasattr(model, "stem") and hasattr(model, "repeat") and hasattr(model, "mixed_6a"):

@@ -175,7 +175,7 @@ venv.bak/
 .ropeproject
 # mkdocs documentation
 /site
-/progression_prediction/results_fusion
+*/results_fusion
 # mypy
 .mypy_cache/
 .dmypy.json
