@@ -15,6 +15,10 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models as tv_models
 from torchvision import transforms as T
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:
+    SummaryWriter = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROJECT_ROOT.parent
@@ -45,6 +49,16 @@ RESNET_WEIGHTS = {
     "resnet101": tv_models.ResNet101_Weights.DEFAULT,
     "resnet152": tv_models.ResNet152_Weights.DEFAULT,
 }
+_TENSORBOARD_WARNED = False
+
+
+def _resnet_sort_key(name: str) -> int:
+    digits = "".join(ch for ch in name if ch.isdigit())
+    return int(digits) if digits else 0
+
+
+def _format_float(value: float) -> str:
+    return f"{value:.0e}"
 
 
 def _tf(train: bool, img_size: int) -> T.Compose:
@@ -236,6 +250,8 @@ def train_progression_late_fusion(
     *,
     cultivar_csv: str | Path = DEFAULT_CULTIVAR_CSV,
     epochs: int = 20,
+    early_stopping_patience: Optional[int] = 5,
+    early_stopping_min_delta: float = 0.0,
     unfreeze_layers: int = -1,
     fusion_mode: str = "concat+sum+prod",
     batch_size: int = 32,
@@ -251,6 +267,7 @@ def train_progression_late_fusion(
     """
     Train a late-fusion model that combines RGB features with cultivar embeddings.
     """
+    global _TENSORBOARD_WARNED
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     train_loader, val_loader, test_loader, class_names, num_types = make_progression_loaders(
@@ -276,8 +293,19 @@ def train_progression_late_fusion(
     params = [p for p in list(backbone.parameters()) + list(head.parameters()) if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
 
-    run_name = f"prog-rgb-apple-{fusion_mode.replace('+', '_')}-{datetime.now():%Y%m%d-%H%M%S}"
+    run_name = (
+        f"prog-rgb-apple-{resnet_name}-{fusion_mode.replace('+', '_')}"
+        f"-lr{_format_float(lr)}-wd{_format_float(weight_decay)}"
+        f"-{datetime.now():%Y%m%d-%H%M%S}"
+    )
     saver = ResultSaver(base_dir=str(save_base_dir), run_name=run_name)
+    writer = None
+    if SummaryWriter is not None:
+        writer = SummaryWriter(log_dir=str(saver.base_dir / "tensorboard"))
+    else:
+        if not _TENSORBOARD_WARNED:
+            print("[late_fusion] TensorBoard not available; skipping SummaryWriter logging.")
+            _TENSORBOARD_WARNED = True
 
     results = fit_with_saving(
         backbone=backbone,
@@ -292,7 +320,12 @@ def train_progression_late_fusion(
         input_shape=(feat_dim,),
         image_shape=(3, img_size, img_size),
         saver=saver,
+        early_stopping_patience=early_stopping_patience,
+        early_stopping_min_delta=early_stopping_min_delta,
+        writer=writer,
     )
+    if writer is not None:
+        writer.close()
 
     results.update(
         {
@@ -302,6 +335,10 @@ def train_progression_late_fusion(
             "fusion_mode": fusion_mode,
             "resnet": resnet_name,
             "pretrained": pretrained,
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "early_stopping_patience": early_stopping_patience,
+            "early_stopping_min_delta": early_stopping_min_delta,
             "save_dir": str(saver.base_dir),
             "run_name": run_name,
         }
@@ -319,9 +356,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--img-size", type=int, default=224, help="Image resize.")
     parser.add_argument(
         "--resnet",
-        default="resnet18",
+        nargs="+",
+        default=list(RESNET_BUILDERS),
         choices=sorted(RESNET_BUILDERS),
-        help="ResNet backbone variant.",
+        help="ResNet backbone variant(s) for grid search.",
     )
     parser.add_argument("--pretrained", action="store_true", default=True, help="Use ImageNet pretrained weights.")
     parser.add_argument("--no-pretrained", dest="pretrained", action="store_false", help="Disable pretrained weights.")
@@ -331,8 +369,32 @@ def _parse_args() -> argparse.Namespace:
         help="Fusion mode (sum, prod, concat, concat+sum+prod) or 'all' to run every mode.",
     )
     parser.add_argument("--unfreeze-layers", type=int, default=-1, help="Backbone unfreeze depth.")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
-    parser.add_argument("--weight-decay", type=float, default=1e-4, help="Weight decay.")
+    parser.add_argument(
+        "--lr",
+        type=float,
+        nargs="+",
+        default=[3e-4, 1e-4, 3e-5],
+        help="Learning rate grid.",
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        nargs="+",
+        default=[1e-4],
+        help="Weight decay grid.",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=5,
+        help="Early stopping patience on val loss (<=0 disables).",
+    )
+    parser.add_argument(
+        "--early-stop-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum val-loss improvement to reset early stopping.",
+    )
     parser.add_argument("--device", default=None, help="Override device (e.g., 'cpu').")
     parser.add_argument(
         "--save-dir",
@@ -351,24 +413,45 @@ def main() -> None:
         else [args.fusion_mode]
     )
 
-    for mode in modes:
-        print(f"[late_fusion] Training progression model with fusion mode '{mode}'")
-        train_progression_late_fusion(
-            data_directory=args.data,
-            cultivar_csv=args.cultivar_csv,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            img_size=args.img_size,
-            fusion_mode=mode,
-            unfreeze_layers=args.unfreeze_layers,
-            resnet_name=args.resnet,
-            pretrained=args.pretrained,
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            device=args.device,
-            save_base_dir=args.save_dir,
-        )
+    resnet_grid = sorted(args.resnet, key=_resnet_sort_key)
+    lr_grid = args.lr
+    weight_decay_grid = args.weight_decay
+    total = len(resnet_grid) * len(lr_grid) * len(weight_decay_grid) * len(modes)
+    run_idx = 0
+
+    print(
+        "[late_fusion] Grid search config:"
+        f" resnets={resnet_grid}, lrs={lr_grid}, weight_decays={weight_decay_grid}, modes={modes}"
+    )
+
+    for resnet_name in resnet_grid:
+        for lr in lr_grid:
+            for weight_decay in weight_decay_grid:
+                for mode in modes:
+                    run_idx += 1
+                    print(
+                        "[late_fusion] "
+                        f"({run_idx}/{total}) resnet={resnet_name} lr={lr} "
+                        f"weight_decay={weight_decay} fusion_mode='{mode}'"
+                    )
+                    train_progression_late_fusion(
+                        data_directory=args.data,
+                        cultivar_csv=args.cultivar_csv,
+                        epochs=args.epochs,
+                        early_stopping_patience=args.early_stop_patience,
+                        early_stopping_min_delta=args.early_stop_min_delta,
+                        batch_size=args.batch_size,
+                        num_workers=args.num_workers,
+                        img_size=args.img_size,
+                        fusion_mode=mode,
+                        unfreeze_layers=args.unfreeze_layers,
+                        resnet_name=resnet_name,
+                        pretrained=args.pretrained,
+                        lr=lr,
+                        weight_decay=weight_decay,
+                        device=args.device,
+                        save_base_dir=args.save_dir,
+                    )
 
 
 if __name__ == "__main__":

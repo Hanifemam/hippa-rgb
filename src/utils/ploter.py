@@ -9,6 +9,10 @@ from torch.nn.utils import weight_norm
 import numpy as np
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:
+    SummaryWriter = None
 
 try:
     from result_save import (
@@ -447,6 +451,9 @@ def fit_with_saving(backbone: nn.Module,
                     class_names: Optional[List[str]] = None,
                     input_shape: Optional[Tuple[int, ...]] = None,  # head-only summary
                     image_shape: Tuple[int, int, int] = (3, 224, 224),  # full model summary
+                    early_stopping_patience: Optional[int] = None,
+                    early_stopping_min_delta: float = 0.0,
+                    writer: Optional["SummaryWriter"] = None,
                     saver: Optional[ResultSaver] = None):
     """
     Full training loop with tqdm progress bars and robust saving.
@@ -464,7 +471,12 @@ def fit_with_saving(backbone: nn.Module,
 
     history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
     best_val_loss = float("inf")
+    best_epoch = 0
     best_state = None
+    no_improve = 0
+    stopped_early = False
+    if early_stopping_patience is not None and early_stopping_patience <= 0:
+        early_stopping_patience = None
 
     for epoch in range(1, epochs + 1):
         print(f"\nEpoch {epoch}/{epochs}")
@@ -477,9 +489,18 @@ def fit_with_saving(backbone: nn.Module,
         history["val_acc"].append(val_metrics["acc"])
 
         saver.save_metrics("epoch", history)
+        if writer is not None:
+            writer.add_scalar("loss/train", train_metrics["loss"], epoch)
+            writer.add_scalar("loss/val", val_metrics["loss"], epoch)
+            writer.add_scalar("acc/train", train_metrics["acc"], epoch)
+            writer.add_scalar("acc/val", val_metrics["acc"], epoch)
+            writer.add_scalar("lr", optimizer.param_groups[0].get("lr", float("nan")), epoch)
+            writer.flush()
 
-        if val_metrics["loss"] < best_val_loss:
+        if val_metrics["loss"] < (best_val_loss - early_stopping_min_delta):
             best_val_loss = val_metrics["loss"]
+            best_epoch = epoch
+            no_improve = 0
             best_state = {
                 "epoch": epoch,
                 "backbone": getattr(backbone, "state_dict")() if hasattr(backbone, "state_dict") else None,
@@ -488,6 +509,22 @@ def fit_with_saving(backbone: nn.Module,
                 "history": history,
             }
             saver.save_checkpoint(best_state, filename="best_late_fusion.pth")
+        else:
+            no_improve += 1
+
+        if early_stopping_patience is not None and no_improve >= early_stopping_patience:
+            print(
+                f"Early stopping triggered at epoch {epoch} "
+                f"(no improvement for {no_improve} epochs)."
+            )
+            stopped_early = True
+            break
+
+    if best_state is not None:
+        if best_state.get("backbone") is not None:
+            backbone.load_state_dict(best_state["backbone"])
+        if best_state.get("head") is not None:
+            head.load_state_dict(best_state["head"])
 
     fig = plot_learning_curves(history)
     if fig is not None:
@@ -541,4 +578,10 @@ def fit_with_saving(backbone: nn.Module,
             if fig is not None:
                 saver.save_confusion(split_name, fig)
 
-    return {"history": history, "best_val_loss": best_val_loss, "splits": splits}
+    return {
+        "history": history,
+        "best_val_loss": best_val_loss,
+        "best_epoch": best_epoch,
+        "stopped_early": stopped_early,
+        "splits": splits,
+    }
