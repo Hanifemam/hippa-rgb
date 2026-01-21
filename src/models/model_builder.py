@@ -7,6 +7,7 @@ import torch.nn as nn
 from torchvision import models as tv_models
 
 from models.late_fusion_embeddings import LateFusionHead
+from models.hybrid_augmented import HMAFDD, HMAFDDLateFusion
 from models.tian_msd_model import TianMSDNet
 
 
@@ -350,6 +351,8 @@ _MODEL_REGISTRY = {
     "tian_msd_v4": lambda **kw: TianMSDClassifier(variant="msd_inception_v4", **kw),
     "tian_msd_irv2_latefusion": lambda **kw: TianMSDLateFusion(variant="msd_inception_resnet_v2", **kw),
     "tian_msd_v4_latefusion": lambda **kw: TianMSDLateFusion(variant="msd_inception_v4", **kw),
+    "hybrid_augmented": HMAFDD,
+    "hybrid_augmented_latefusion": HMAFDDLateFusion,
 }
 
 
