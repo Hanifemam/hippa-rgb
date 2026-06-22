@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import random
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,10 @@ import torch.nn as nn
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms as T
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:
+    SummaryWriter = None
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATASET = REPO_ROOT / "data" / "apple_type"
@@ -180,6 +185,28 @@ def _run_epoch(
     return total_loss / count, correct / count
 
 
+def _save_labeled_predictions(
+    model: nn.Module,
+    loader: DataLoader,
+    class_names: list[str],
+    output_csv: Path,
+    device: torch.device,
+) -> None:
+    rows = []
+    model.eval()
+    with torch.no_grad():
+        for images, labels, names in loader:
+            predictions = model(images.to(device)).argmax(1).cpu().tolist()
+            rows.extend(
+                (name, class_names[label], class_names[prediction])
+                for name, label, prediction in zip(names, labels.tolist(), predictions)
+            )
+    with output_csv.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(["sample_name", "true_label", "pred_label"])
+        writer.writerows(rows)
+
+
 def save_cultivar_predictions(
     model: nn.Module,
     image_root: str | Path,
@@ -226,9 +253,13 @@ def train_apple_type(
     pretrained: bool = True,
     device: Optional[str] = None,
     save_base_dir: str | Path = DEFAULT_RESULTS_ROOT,
+    seed: int = 42,
 ) -> dict[str, object]:
-    random.seed(42)
-    torch.manual_seed(42)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     data_root = Path(data_directory)
     train_loader, val_loader, test_loader, class_names = _make_loaders(
@@ -244,13 +275,55 @@ def train_apple_type(
 
     run_dir = Path(save_base_dir) / f"resnet152-{datetime.now():%Y%m%d-%H%M%S}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    config = {
+        "data_directory": str(data_root),
+        "prediction_data": str(prediction_data or data_root),
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "img_size": img_size,
+        "lr": lr,
+        "weight_decay": weight_decay,
+        "unfreeze_layers": unfreeze_layers,
+        "patience": patience,
+        "pretrained": pretrained,
+        "device": str(dev),
+        "seed": seed,
+        "class_names": class_names,
+    }
+    with (run_dir / "config.json").open("w", encoding="utf-8") as file:
+        json.dump(config, file, indent=2)
+    with (run_dir / "model_summary.txt").open("w", encoding="utf-8") as file:
+        file.write(repr(model))
+    writer = SummaryWriter(log_dir=run_dir / "tensorboard") if SummaryWriter is not None else None
+    if writer is not None:
+        writer.add_text("configuration", "\n".join(f"{key}: {value}" for key, value in config.items()))
+
     best_accuracy, stale_epochs = -1.0, 0
     checkpoint = run_dir / "best_model.pt"
+    history: list[dict[str, float | int]] = []
 
     for epoch in range(1, epochs + 1):
         train_loss, train_accuracy = _run_epoch(model, train_loader, dev, optimizer)
         val_loss, val_accuracy = _run_epoch(model, val_loader, dev)
         scheduler.step(val_loss)
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "train_accuracy": train_accuracy,
+                "val_loss": val_loss,
+                "val_accuracy": val_accuracy,
+                "learning_rate": optimizer.param_groups[0]["lr"],
+            }
+        )
+        if writer is not None:
+            writer.add_scalar("loss/train", train_loss, epoch)
+            writer.add_scalar("loss/val", val_loss, epoch)
+            writer.add_scalar("acc/train", train_accuracy, epoch)
+            writer.add_scalar("acc/val", val_accuracy, epoch)
+            writer.add_scalar("lr", optimizer.param_groups[0]["lr"], epoch)
+            writer.flush()
         print(
             f"[epoch {epoch:02d}] train_loss={train_loss:.4f} train_acc={train_accuracy:.4f} "
             f"val_loss={val_loss:.4f} val_acc={val_accuracy:.4f}"
@@ -265,6 +338,15 @@ def train_apple_type(
 
     model.load_state_dict(torch.load(checkpoint, map_location=dev))
     test_loss, test_accuracy = _run_epoch(model, test_loader, dev)
+    _save_labeled_predictions(model, val_loader, class_names, run_dir / "val_predictions.csv", dev)
+    _save_labeled_predictions(model, test_loader, class_names, run_dir / "test_predictions.csv", dev)
+    with (run_dir / "epoch_metrics.csv").open("w", newline="", encoding="utf-8") as file:
+        csv_writer = csv.DictWriter(file, fieldnames=list(history[0]) if history else ["epoch"])
+        csv_writer.writeheader()
+        csv_writer.writerows(history)
+    with (run_dir / "history.json").open("w", encoding="utf-8") as file:
+        json.dump(history, file, indent=2)
+
     csv_path = Path(output_csv) if output_csv else run_dir / "meta_data_cultivar.csv"
     save_cultivar_predictions(
         model,
@@ -276,8 +358,8 @@ def train_apple_type(
         num_workers=num_workers,
         img_size=img_size,
     )
-    return {
-        "model": model,
+    summary = {
+        "run_dir": str(run_dir),
         "class_names": class_names,
         "best_val_accuracy": best_accuracy,
         "test_loss": test_loss,
@@ -285,6 +367,13 @@ def train_apple_type(
         "checkpoint": str(checkpoint),
         "prediction_csv": str(csv_path),
     }
+    with (run_dir / "summary.json").open("w", encoding="utf-8") as file:
+        json.dump(summary, file, indent=2)
+    if writer is not None:
+        writer.add_scalar("final/test_loss", test_loss, 0)
+        writer.add_scalar("final/test_accuracy", test_accuracy, 0)
+        writer.close()
+    return summary
 
 
 def main() -> None:
@@ -302,6 +391,7 @@ def main() -> None:
     parser.add_argument("--unfreeze-layers", type=int, default=0)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-pretrained", dest="pretrained", action="store_false")
     parser.set_defaults(pretrained=True)
     args = parser.parse_args()
@@ -320,6 +410,7 @@ def main() -> None:
         pretrained=args.pretrained,
         device=args.device,
         save_base_dir=args.save_dir,
+        seed=args.seed,
     )
 
 

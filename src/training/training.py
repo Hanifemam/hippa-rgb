@@ -83,6 +83,7 @@ def run_single_experiment(
     train_loader,
     val_loader,
     forward_fn=None,
+    test_loader=None,
 ) -> Dict[str, Any]:
     """Train one hyperparameter combo and save artifacts."""
     combo_dir.mkdir(parents=True, exist_ok=True)
@@ -115,6 +116,10 @@ def run_single_experiment(
     loss_fn = torch.nn.CrossEntropyLoss()
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=2)
     writer = SummaryWriter(log_dir=combo_dir / "tensorboard")
+    writer.add_text(
+        "configuration",
+        "\n".join(f"{key}: {value}" for key, value in sorted(base_hparams.items())),
+    )
 
     def _log_graph():
         """Try to add a model graph to TensorBoard using one sample batch."""
@@ -178,12 +183,11 @@ def run_single_experiment(
         device=device,
         scheduler=scheduler,
         scheduler_on="loss",
-        early_stopping_patience=5,
+        early_stopping_patience=base_hparams.get("early_stopping_patience", 5),
         epoch_save_fn=_epoch_save,
         forward_fn=forward_fn,
         writer=writer,
     )
-    writer.close()
 
     # Load best weights for evaluation/pred logging.
     best_state = train_result.get("best_state_dict")
@@ -215,6 +219,32 @@ def run_single_experiment(
                            base_hparams["class_to_idx"])
     _save_learning_curves(history, combo_dir / "learning_curves.png")
 
+    evaluation = {
+        "val_accuracy": sum(p == y for p, y in zip(val_preds, val_labels)) / max(len(val_labels), 1),
+    }
+    writer.add_scalar("final/val_accuracy", evaluation["val_accuracy"], 0)
+    if test_loader is not None:
+        test_preds, test_labels, _ = _save_predictions(
+            model,
+            test_loader,
+            device,
+            base_hparams["class_to_idx"],
+            combo_dir / "test_predictions.csv",
+            forward_fn=forward_fn,
+        )
+        _save_confusion_matrix(
+            test_labels,
+            test_preds,
+            combo_dir / "test_confusion_matrix.png",
+            base_hparams["class_to_idx"],
+        )
+        evaluation["test_accuracy"] = (
+            sum(p == y for p, y in zip(test_preds, test_labels)) / max(len(test_labels), 1)
+        )
+        writer.add_scalar("final/test_accuracy", evaluation["test_accuracy"], 0)
+    _write_json(combo_dir / "evaluation.json", evaluation)
+    writer.close()
+
     hist = train_result.get("history", {})
     summary_lines = [
         "HIPPA RGB classifier training run",
@@ -227,8 +257,10 @@ def run_single_experiment(
         summary_lines.append(f"\nFinal val_acc: {hist['val_acc'][-1]:.4f}")
     if train_result.get("best_val_loss") is not None:
         summary_lines.append(f"Best val_loss: {train_result['best_val_loss']:.4f} at epoch {train_result.get('best_epoch', 'n/a')}")
+    summary_lines.extend(f"{name}: {value:.4f}" for name, value in evaluation.items())
     _write_text(combo_dir / "summary.txt", "\n".join(summary_lines))
 
+    train_result["evaluation"] = evaluation
     return train_result
 
 
@@ -449,7 +481,7 @@ def main():
         "img_prog": _forward_factory("img_prog"),
         "img_prog_cult": _forward_factory("img_prog_cult"),
     }
-    fusion_modes = ("concat", "sum", "prod", "concat+sum+prod")
+    fusion_modes = ("sum",)
     variants = [
         # {"name": "conv4_pure", "model_name": "conv4dcnn", "mode": "img", "fusion_mode": None},
         # {"name": "resnet18_pure", "model_name": "resnet18", "mode": "img", "fusion_mode": None},

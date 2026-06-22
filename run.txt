@@ -1,0 +1,12 @@
+conda env update -f environment.yml
+
+python src/training/run_final_experiments.py \
+  --disease-data /path/to/disease_dataset \
+  --true-metadata /path/to/disease_true_metadata.csv \
+  --apple-data /path/to/apple_type_dataset \
+  --progression-data /path/to/progression_dataset \
+  --progression-cultivar-csv /path/to/progression_cultivar.csv \
+  --results /path/to/results
+
+
+  tensorboard --logdir /path/to/results

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import random
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -86,15 +88,29 @@ def _image_files(root: Path) -> list[Path]:
     return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
 
 
-def _load_cultivar_map(csv_path: Path, image_col: str = "sample_name", cultivar_col: str = "cultivar"):
+def _load_cultivar_map(
+    csv_path: Path,
+    image_col: str = "sample_name",
+    cultivar_col: str = "cultivar",
+    cultivar2id: dict[str, int] | None = None,
+):
     df = pd.read_csv(csv_path)
     for col in (image_col, cultivar_col):
         if col not in df.columns:
             raise KeyError(f"CSV missing '{col}'. Found: {list(df.columns)}")
+    if df[image_col].duplicated().any():
+        duplicates = df.loc[df[image_col].duplicated(), image_col].astype(str).tolist()
+        raise ValueError(f"Cultivar CSV has duplicate sample names, e.g. {duplicates[:5]}")
+    if df[cultivar_col].isna().any():
+        raise ValueError(f"Cultivar CSV contains missing values in '{cultivar_col}'.")
     df[image_col] = df[image_col].astype(str)
     df[cultivar_col] = df[cultivar_col].astype(str)
     cultivars = sorted(df[cultivar_col].dropna().unique().tolist())
-    cultivar2id = {name: idx for idx, name in enumerate(cultivars)}
+    if cultivar2id is None:
+        cultivar2id = {name: idx for idx, name in enumerate(cultivars)}
+    unknown = sorted(set(cultivars) - set(cultivar2id))
+    if unknown:
+        raise ValueError(f"Cultivar CSV contains classes unseen during training: {unknown}")
     sample_to_cultivar = {row[image_col]: cultivar2id[row[cultivar_col]] for row in df.to_dict("records")}
     return sample_to_cultivar, cultivar2id
 
@@ -246,7 +262,7 @@ def make_progression_loaders(
         print("[late_fusion] test split not found; using val loader for test metrics.")
         test_loader = val_loader
 
-    return train_loader, val_loader, test_loader, class_names, len(cultivar2id)
+    return train_loader, val_loader, test_loader, class_names, cultivar2id
 
 
 def save_progression_predictions(
@@ -261,8 +277,11 @@ def save_progression_predictions(
     batch_size: int,
     num_workers: int,
     img_size: int,
+    cultivar2id: dict[str, int] | None = None,
 ) -> Path:
-    cultivar_map, cultivar2id = _load_cultivar_map(Path(cultivar_csv))
+    cultivar_map, cultivar2id = _load_cultivar_map(
+        Path(cultivar_csv), cultivar2id=cultivar2id
+    )
     id2cultivar = {idx: name for name, idx in cultivar2id.items()}
     dataset = ProgressionPredictionDataset(
         Path(image_root), cultivar_map, _tf(False, img_size)
@@ -340,15 +359,24 @@ def train_progression_late_fusion(
     device: Optional[str] = None,
     save_base_dir: str | Path = DEFAULT_RESULTS_ROOT,
     prediction_data: str | Path | None = None,
+    prediction_cultivar_csv: str | Path | None = None,
     output_csv: str | Path | None = None,
+    prediction_jobs: list[tuple[str | Path, str | Path]] | None = None,
+    seed: int = 42,
 ):
     """
     Train a late-fusion model that combines RGB features with cultivar embeddings.
     """
     global _TENSORBOARD_WARNED
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    train_loader, val_loader, test_loader, class_names, num_types = make_progression_loaders(
+    train_loader, val_loader, test_loader, class_names, cultivar2id = make_progression_loaders(
         data_directory,
         cultivar_csv,
         batch_size=batch_size,
@@ -364,7 +392,7 @@ def train_progression_late_fusion(
     head = LateFusionClassifier(
         feat_dim=feat_dim,
         num_classes=len(class_names),
-        num_types=num_types,
+        num_types=len(cultivar2id),
         fusion_mode=fusion_mode,
     ).to(dev)
 
@@ -380,6 +408,21 @@ def train_progression_late_fusion(
     writer = None
     if SummaryWriter is not None:
         writer = SummaryWriter(log_dir=str(saver.base_dir / "tensorboard"))
+        writer.add_text(
+            "configuration",
+            "\n".join(
+                [
+                    f"resnet: {resnet_name}",
+                    f"fusion_mode: {fusion_mode}",
+                    f"epochs: {epochs}",
+                    f"batch_size: {batch_size}",
+                    f"learning_rate: {lr}",
+                    f"weight_decay: {weight_decay}",
+                    f"unfreeze_layers: {unfreeze_layers}",
+                    f"seed: {seed}",
+                ]
+            ),
+        )
     else:
         if not _TENSORBOARD_WARNED:
             print("[late_fusion] TensorBoard not available; skipping SummaryWriter logging.")
@@ -402,28 +445,40 @@ def train_progression_late_fusion(
         early_stopping_min_delta=early_stopping_min_delta,
         writer=writer,
     )
-    if writer is not None:
-        writer.close()
+    jobs = prediction_jobs or [
+        (
+            prediction_cultivar_csv or cultivar_csv,
+            output_csv or saver.base_dir / "meta_data.csv",
+        )
+    ]
+    prediction_csvs = []
+    for job_cultivar_csv, job_output_csv in jobs:
+        csv_path = save_progression_predictions(
+            backbone,
+            head,
+            prediction_data or data_directory,
+            job_cultivar_csv,
+            class_names,
+            job_output_csv,
+            device=dev,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            img_size=img_size,
+            cultivar2id=cultivar2id,
+        )
+        prediction_csvs.append(str(csv_path))
 
-    csv_path = Path(output_csv) if output_csv else saver.base_dir / "meta_data.csv"
-    save_progression_predictions(
-        backbone,
-        head,
-        prediction_data or data_directory,
-        cultivar_csv,
-        class_names,
-        csv_path,
-        device=dev,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        img_size=img_size,
-    )
+    if writer is not None:
+        for split_name, metrics in results.get("splits", {}).items():
+            writer.add_scalar(f"final/{split_name}_loss", metrics["loss"], 0)
+            writer.add_scalar(f"final/{split_name}_accuracy", metrics["acc"], 0)
+        writer.close()
 
     results.update(
         {
             "class_names": class_names,
-            "num_apple_types": num_types,
-            "num_cultivars": num_types,
+            "num_apple_types": len(cultivar2id),
+            "num_cultivars": len(cultivar2id),
             "fusion_mode": fusion_mode,
             "resnet": resnet_name,
             "pretrained": pretrained,
@@ -431,9 +486,11 @@ def train_progression_late_fusion(
             "weight_decay": weight_decay,
             "early_stopping_patience": early_stopping_patience,
             "early_stopping_min_delta": early_stopping_min_delta,
+            "seed": seed,
             "save_dir": str(saver.base_dir),
             "run_name": run_name,
-            "prediction_csv": str(csv_path),
+            "prediction_csv": prediction_csvs[0],
+            "prediction_csvs": prediction_csvs,
         }
     )
     return results
@@ -444,6 +501,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--data", default=str(DEFAULT_DATASET), help="Root of prepared dataset.")
     parser.add_argument("--cultivar-csv", default=str(DEFAULT_CULTIVAR_CSV), help="CSV with cultivar labels.")
     parser.add_argument("--predict-data", default=None, help="Images that need progression predictions.")
+    parser.add_argument(
+        "--prediction-cultivar-csv",
+        default=None,
+        help="Cultivar CSV for prediction images; defaults to --cultivar-csv.",
+    )
     parser.add_argument("--output-csv", default=None, help="Output metadata CSV path.")
     parser.add_argument("--epochs", type=int, default=20, help="Training epochs.")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size.")
@@ -460,7 +522,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-pretrained", dest="pretrained", action="store_false", help="Disable pretrained weights.")
     parser.add_argument(
         "--fusion-mode",
-        default="all",
+        default="sum",
         help="Fusion mode (sum, prod, concat, concat+sum+prod) or 'all' to run every mode.",
     )
     parser.add_argument("--unfreeze-layers", type=int, default=-1, help="Backbone unfreeze depth.")
@@ -491,6 +553,7 @@ def _parse_args() -> argparse.Namespace:
         help="Minimum val-loss improvement to reset early stopping.",
     )
     parser.add_argument("--device", default=None, help="Override device (e.g., 'cpu').")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
         "--save-dir",
         default=str(DEFAULT_RESULTS_ROOT),
@@ -547,7 +610,9 @@ def main() -> None:
                         device=args.device,
                         save_base_dir=args.save_dir,
                         prediction_data=args.predict_data,
+                        prediction_cultivar_csv=args.prediction_cultivar_csv,
                         output_csv=args.output_csv,
+                        seed=args.seed,
                     )
 
 
