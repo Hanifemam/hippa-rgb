@@ -1,4 +1,8 @@
 conda env update -f environment.yml
+conda activate cv-project
+
+# Run the automated test suite before starting long training jobs.
+python -m pytest
 
 python src/training/run_final_experiments.py \
   --disease-data /path/to/disease_dataset \
@@ -8,5 +12,4 @@ python src/training/run_final_experiments.py \
   --progression-cultivar-csv /path/to/progression_cultivar.csv \
   --results /path/to/results
 
-
-  tensorboard --logdir /path/to/results
+tensorboard --logdir /path/to/results
