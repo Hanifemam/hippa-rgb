@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -156,6 +157,37 @@ class ProgressionCultivarDataset(Dataset):
         return img, torch.tensor(label, dtype=torch.long), torch.tensor(cultivar_id, dtype=torch.long), name
 
 
+class ProgressionPredictionDataset(Dataset):
+    def __init__(self, root: Path, cultivar_map: dict[str, int], tfm: T.Compose):
+        self.tfm = tfm
+        self.items = []
+        missing = []
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for path in _image_files(root):
+            if path.name in seen:
+                duplicates.add(path.name)
+            seen.add(path.name)
+            if path.name not in cultivar_map:
+                missing.append(path.name)
+            else:
+                self.items.append((path, cultivar_map[path.name], path.name))
+        if duplicates:
+            raise ValueError(f"Duplicate sample names found, e.g. {sorted(duplicates)[:5]}")
+        if missing:
+            raise KeyError(f"Missing cultivar labels for {len(missing)} file(s), e.g. {missing[:5]}")
+        if not self.items:
+            raise ValueError(f"No images found under {root}")
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int):
+        path, cultivar_id, name = self.items[idx]
+        image = self.tfm(Image.open(path).convert("RGB"))
+        return image, torch.tensor(cultivar_id, dtype=torch.long), name
+
+
 def make_progression_loaders(
     data_directory: str | Path,
     cultivar_csv: str | Path,
@@ -217,6 +249,50 @@ def make_progression_loaders(
     return train_loader, val_loader, test_loader, class_names, len(cultivar2id)
 
 
+def save_progression_predictions(
+    backbone: nn.Module,
+    head: nn.Module,
+    image_root: str | Path,
+    cultivar_csv: str | Path,
+    class_names: list[str],
+    output_csv: str | Path,
+    *,
+    device: torch.device,
+    batch_size: int,
+    num_workers: int,
+    img_size: int,
+) -> Path:
+    cultivar_map, cultivar2id = _load_cultivar_map(Path(cultivar_csv))
+    id2cultivar = {idx: name for name, idx in cultivar2id.items()}
+    dataset = ProgressionPredictionDataset(
+        Path(image_root), cultivar_map, _tf(False, img_size)
+    )
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    rows: list[tuple[str, str, str]] = []
+    backbone.eval()
+    head.eval()
+    with torch.no_grad():
+        for images, cultivar_ids, names in loader:
+            cultivar_ids = cultivar_ids.to(device)
+            logits = head(backbone(images.to(device)), cultivar_ids)
+            predictions = logits.argmax(1).cpu().tolist()
+            rows.extend(
+                (name, id2cultivar[cultivar_id], class_names[prediction])
+                for name, cultivar_id, prediction in zip(
+                    names, cultivar_ids.cpu().tolist(), predictions
+                )
+            )
+
+    output = Path(output_csv)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(["sample_name", "cultivar", "progression"])
+        writer.writerows(rows)
+    print(f"[save] {output}")
+    return output
+
+
 def _configure_backbone_trainable(backbone: nn.Module, unfreeze_layers: int) -> None:
     if unfreeze_layers < 0:
         for param in backbone.parameters():
@@ -263,6 +339,8 @@ def train_progression_late_fusion(
     pretrained: bool = True,
     device: Optional[str] = None,
     save_base_dir: str | Path = DEFAULT_RESULTS_ROOT,
+    prediction_data: str | Path | None = None,
+    output_csv: str | Path | None = None,
 ):
     """
     Train a late-fusion model that combines RGB features with cultivar embeddings.
@@ -327,6 +405,20 @@ def train_progression_late_fusion(
     if writer is not None:
         writer.close()
 
+    csv_path = Path(output_csv) if output_csv else saver.base_dir / "meta_data.csv"
+    save_progression_predictions(
+        backbone,
+        head,
+        prediction_data or data_directory,
+        cultivar_csv,
+        class_names,
+        csv_path,
+        device=dev,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        img_size=img_size,
+    )
+
     results.update(
         {
             "class_names": class_names,
@@ -341,6 +433,7 @@ def train_progression_late_fusion(
             "early_stopping_min_delta": early_stopping_min_delta,
             "save_dir": str(saver.base_dir),
             "run_name": run_name,
+            "prediction_csv": str(csv_path),
         }
     )
     return results
@@ -350,6 +443,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train progression-stage late fusion model.")
     parser.add_argument("--data", default=str(DEFAULT_DATASET), help="Root of prepared dataset.")
     parser.add_argument("--cultivar-csv", default=str(DEFAULT_CULTIVAR_CSV), help="CSV with cultivar labels.")
+    parser.add_argument("--predict-data", default=None, help="Images that need progression predictions.")
+    parser.add_argument("--output-csv", default=None, help="Output metadata CSV path.")
     parser.add_argument("--epochs", type=int, default=20, help="Training epochs.")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size.")
     parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers.")
@@ -451,6 +546,8 @@ def main() -> None:
                         weight_decay=weight_decay,
                         device=args.device,
                         save_base_dir=args.save_dir,
+                        prediction_data=args.predict_data,
+                        output_csv=args.output_csv,
                     )
 
 
